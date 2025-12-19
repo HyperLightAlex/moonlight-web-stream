@@ -5,6 +5,7 @@ use std::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use bytes::{Bytes, BytesMut};
@@ -70,6 +71,10 @@ pub struct WebRtcVideo {
     clock_rate: u32,
     codec: Option<VideoCodec>,
     samples: Vec<BytesMut>,
+    /// Track the start time for local timestamp generation.
+    /// Using a local clock prevents jitter buffer growth from clock drift
+    /// between the host (game server) and the receiver.
+    stream_start_time: Option<Instant>,
 }
 
 impl WebRtcVideo {
@@ -86,6 +91,7 @@ impl WebRtcVideo {
             codec: None,
             supported_video_formats,
             samples: Default::default(),
+            stream_start_time: None,
         }
     }
 
@@ -154,6 +160,10 @@ impl WebRtcVideo {
 
         self.clock_rate = codec.capability.clock_rate;
 
+        // Initialize stream start time for local timestamp generation
+        // This prevents jitter buffer growth from clock drift between host and receiver
+        self.stream_start_time = Some(Instant::now());
+
         self.codec = match format {
             // -- H264
             VideoFormat::H264 | VideoFormat::H264High8_444 => Some(VideoCodec::H264 {
@@ -187,7 +197,16 @@ impl WebRtcVideo {
     }
 
     pub async fn send_decode_unit(&mut self, unit: &VideoDecodeUnit<'_>) -> DecodeResult {
-        let timestamp = (unit.presentation_time.as_secs_f64() * self.clock_rate as f64) as u32;
+        // Generate RTP timestamp from local clock to prevent jitter buffer drift.
+        // Using host's presentation_time causes drift when host/receiver clocks differ.
+        // The local elapsed time ensures timestamps match actual transmission rate.
+        let timestamp = if let Some(start_time) = self.stream_start_time {
+            let elapsed = start_time.elapsed();
+            (elapsed.as_secs_f64() * self.clock_rate as f64) as u32
+        } else {
+            // Fallback to presentation_time if stream_start_time not set (shouldn't happen)
+            (unit.presentation_time.as_secs_f64() * self.clock_rate as f64) as u32
+        };
 
         let mut full_frame = Vec::new();
         for buffer in unit.buffers {

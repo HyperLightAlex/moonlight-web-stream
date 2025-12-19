@@ -468,6 +468,36 @@ input[type=number] {
     height: 70px;
 }
 
+.qr-code-button {
+    background-color: #4CAF50;
+    color: white;
+    font-size: 0.9rem;
+    padding: 8px 16px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.qr-code-button:hover {
+    background-color: #45a049;
+}
+
+/* QR Auth Modal Styles */
+.qr-auth-modal {
+    text-align: center;
+    color: #fff;
+}
+
+.qr-auth-modal h2 {
+    color: #fff;
+    margin-bottom: 12px;
+}
+
+.qr-auth-modal p {
+    margin-bottom: 12px;
+}
+
 /** Actions */
 .actions-list {
     display: flex;

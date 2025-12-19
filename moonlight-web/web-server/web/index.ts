@@ -12,6 +12,7 @@ import { App, DetailedUser } from "./api_bindings.js";
 import { getLocalStreamSettings, setLocalStreamSettings, StreamSettingsComponent } from "./component/settings_menu.js";
 import { setTouchContextMenuEnabled } from "./polyfill/ios_right_click.js";
 import { buildUrl } from "./config_.js";
+import { QRAuthModal, QRAuthCredentialsPrompt } from "./component/modal/qr_auth.js";
 
 async function startApp() {
     setTouchContextMenuEnabled(true)
@@ -80,6 +81,7 @@ class MainApp implements Component {
     // This is for the default user
     private loginButton = document.createElement("button")
     private adminButton = document.createElement("button")
+    private qrCodeButton = document.createElement("button")
 
     // Actions
     private actionElement = document.createElement("div")
@@ -126,6 +128,12 @@ class MainApp implements Component {
             window.location.href = buildUrl("/admin.html")
         })
         this.adminButton.classList.add("admin-button")
+
+        // QR Code button for mobile app login
+        this.qrCodeButton.innerText = "📱 QR Code"
+        this.qrCodeButton.title = "Show QR code for mobile app login"
+        this.qrCodeButton.addEventListener("click", this.showQRCode.bind(this))
+        this.qrCodeButton.classList.add("qr-code-button")
 
         // Actions
         this.actionElement.classList.add("actions-list")
@@ -342,15 +350,41 @@ class MainApp implements Component {
         if (this.topLineActions.contains(this.adminButton)) {
             this.topLineActions.removeChild(this.adminButton)
         }
+        if (this.topLineActions.contains(this.qrCodeButton)) {
+            this.topLineActions.removeChild(this.qrCodeButton)
+        }
 
         if (this.user.is_default_user) {
             this.topLineActions.appendChild(this.loginButton)
         } else {
+            // Show QR code button for logged-in users
+            this.topLineActions.appendChild(this.qrCodeButton)
             this.topLineActions.appendChild(this.logoutButton)
         }
 
         if (this.user.role == "Admin") {
             this.topLineActions.appendChild(this.adminButton)
+        }
+    }
+
+    /**
+     * Show QR code modal for mobile app authentication.
+     * Prompts for password then displays QR code with credentials.
+     */
+    private async showQRCode() {
+        if (!this.user || this.user.is_default_user) {
+            showErrorPopup("Please log in first to generate a QR code")
+            return
+        }
+
+        // Prompt for password
+        const credentialsPrompt = new QRAuthCredentialsPrompt(this.user.name)
+        const credentials = await showModal(credentialsPrompt)
+
+        if (credentials) {
+            // Show QR code modal with credentials
+            const qrModal = new QRAuthModal(credentials.username, credentials.password)
+            await showModal(qrModal)
         }
     }
     private async refreshGameListActiveGame() {
