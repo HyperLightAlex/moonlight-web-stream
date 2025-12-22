@@ -203,14 +203,14 @@ async fn pair_host(
 
     let mut host = user.host(host_id).await?;
 
-    // Detect if this is a Fuji host
+    // Detect if this is a Backlight host
     let host_type = host.detect_host_type(&mut user).await.unwrap_or(HostType::Standard);
 
     match host_type {
-        HostType::Fuji => {
-            // Fuji host: auto-pair using OTP (no PIN needed)
+        HostType::Backlight => {
+            // Backlight host: auto-pair using OTP (no PIN needed)
             let (stream_response, stream_sender) =
-                StreamedResponse::new(PostPairResponse1::FujiAutoPairing);
+                StreamedResponse::new(PostPairResponse1::BacklightAutoPairing);
 
             spawn(async move {
                 let result = host.pair_fuji(&mut user).await;
@@ -226,13 +226,13 @@ async fn pair_host(
                             .send(PostPairResponse2::Paired(detailed_host))
                             .await
                         {
-                            warn!("Failed to send Fuji pair success: {err:?}");
+                            warn!("Failed to send Backlight pair success: {err:?}");
                         }
                     }
                     Err(err) => {
-                        warn!("Failed to Fuji auto-pair host: {err}");
+                        warn!("Failed to Backlight auto-pair host: {err}");
                         if let Err(err) = stream_sender.send(PostPairResponse2::PairError).await {
-                            warn!("Failed to send Fuji pair failure: {err:?}");
+                            warn!("Failed to send Backlight pair failure: {err:?}");
                         }
                     }
                 }

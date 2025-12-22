@@ -398,12 +398,21 @@ impl Host {
                     }
                 };
 
+                // Detect host type (Backlight vs Standard Sunshine)
+                let https_hostport = Self::build_hostport(&storage.address, info.https_port);
+                let host_type = if is_fuji_host(&https_hostport).await {
+                    Some(HostType::Backlight)
+                } else {
+                    Some(HostType::Standard)
+                };
+
                 Ok(DetailedHost {
                     host_id: self.id.0,
                     owner,
                     name: info.host_name,
                     paired: info.pair_status.into(),
                     server_state: server_state.map(HostState::from),
+                    host_type,
                     address: storage.address,
                     http_port: storage.http_port,
                     https_port: info.https_port,
@@ -431,6 +440,7 @@ impl Host {
                     name: storage.cache.name,
                     paired,
                     server_state: None,
+                    host_type: None,
                     address: storage.address,
                     http_port: storage.http_port,
                     https_port: 0,
@@ -549,7 +559,7 @@ impl Host {
         todo!()
     }
 
-    /// Detect if this host is a Fuji host (supports OTP auto-pairing)
+    /// Detect if this host is a Backlight host (supports OTP auto-pairing)
     pub async fn detect_host_type(&mut self, user: &mut AuthenticatedUser) -> Result<HostType, AppError> {
         self.can_use(user).await?;
 
@@ -565,17 +575,17 @@ impl Host {
         debug!("Detecting host type for: {}", https_hostport);
 
         if is_fuji_host(&https_hostport).await {
-            debug!("Host {} detected as Fuji", https_hostport);
-            Ok(HostType::Fuji)
+            debug!("Host {} detected as Backlight", https_hostport);
+            Ok(HostType::Backlight)
         } else {
             debug!("Host {} detected as Standard Sunshine", https_hostport);
             Ok(HostType::Standard)
         }
     }
 
-    /// Auto-pair with a Fuji host using OTP
+    /// Auto-pair with a Backlight host using OTP
     ///
-    /// This requests an OTP from the Fuji host and uses it to complete pairing
+    /// This requests an OTP from the Backlight host and uses it to complete pairing
     /// without requiring manual PIN entry.
     pub async fn pair_fuji(&mut self, user: &mut AuthenticatedUser) -> Result<(), AppError> {
         self.can_use(user).await?;
@@ -595,24 +605,24 @@ impl Host {
         let storage = self.storage_host(&app).await?;
         let https_hostport = Self::build_hostport(&storage.address, info.https_port);
 
-        // Request OTP from Fuji
+        // Request OTP from Backlight
         let passphrase = Uuid::new_v4().to_string();
         let device_name = &app.config.moonlight.pair_device_name;
 
         let otp = request_fuji_otp(&https_hostport, &passphrase, device_name)
             .await
             .map_err(|e| {
-                warn!("Failed to request Fuji OTP: {e}");
+                warn!("Failed to request Backlight OTP: {e}");
                 AppError::FujiPairingFailed(format!("OTP request failed: {e}"))
             })?;
 
         // Parse the OTP PIN as a PairPin (expects 4 digit string like "1234")
         let pin = parse_pin_string(&otp.pin).ok_or_else(|| {
-            warn!("Invalid OTP PIN format from Fuji: {}", otp.pin);
+            warn!("Invalid OTP PIN format from Backlight: {}", otp.pin);
             AppError::FujiPairingFailed(format!("Invalid PIN format: {}", otp.pin))
         })?;
 
-        debug!("Received Fuji OTP, proceeding with auto-pairing");
+        debug!("Received Backlight OTP, proceeding with auto-pairing");
 
         // Now use the standard pairing flow with the OTP PIN
         let modify = self
@@ -652,7 +662,7 @@ impl Host {
                             (Some(info.host_name), Some(info.mac))
                         }
                         Err(err) => {
-                            warn!("Failed to make https request to host {this:?} after Fuji pairing completed: {err}");
+                            warn!("Failed to make https request to host {this:?} after Backlight pairing completed: {err}");
                             (None, None)
                         }
                     };

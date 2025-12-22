@@ -20,6 +20,7 @@ export class Host implements Component {
     private imageElement: HTMLImageElement = document.createElement("img")
     private imageOverlayElement: HTMLImageElement = document.createElement("img")
     private nameElement: HTMLElement = document.createElement("p")
+    private badgeElement: HTMLSpanElement = document.createElement("span")
 
     constructor(api: Api, hostId: number, host: UndetailedHost | DetailedHost | null) {
         this.api = api
@@ -37,10 +38,15 @@ export class Host implements Component {
         // Configure name
         this.nameElement.classList.add("host-name")
 
+        // Configure badge (for Backlight hosts)
+        this.badgeElement.classList.add("host-badge")
+        this.badgeElement.style.display = "none"
+
         // Append elements
         this.divElement.appendChild(this.imageElement)
         this.divElement.appendChild(this.imageOverlayElement)
         this.divElement.appendChild(this.nameElement)
+        this.divElement.appendChild(this.badgeElement)
 
         this.divElement.addEventListener("click", this.onClick.bind(this))
         this.divElement.addEventListener("contextmenu", this.onContextMenu.bind(this))
@@ -154,9 +160,13 @@ export class Host implements Component {
         }
         this.updateCache(host, this.userCache)
 
+        const hostTypeDisplay = host.host_type === "Backlight" ? "Backlight" : 
+                                host.host_type === "Standard" ? "Standard Sunshine" : "Unknown";
+        
         await showMessage(
             `Web Id: ${host.host_id}\n` +
             `Name: ${host.name}\n` +
+            `Host Type: ${hostTypeDisplay}\n` +
             `Pair Status: ${host.paired}\n` +
             `State: ${host.server_state}\n` +
             `Address: ${host.address}\n` +
@@ -247,10 +257,10 @@ export class Host implements Component {
 
         const messageAbort = new AbortController()
 
-        // Check if this is a Fuji host (auto-pairing) or standard Sunshine (PIN required)
-        if ("FujiAutoPairing" in responseStream.response) {
-            // Fuji host: auto-pairing in progress, no PIN needed
-            showMessage(`Auto-pairing with Fuji host ${this.getCache()?.name}...\nNo PIN required.`, { signal: messageAbort.signal })
+        // Check if this is a Backlight host (auto-pairing) or standard Sunshine (PIN required)
+        if ("BacklightAutoPairing" in responseStream.response) {
+            // Backlight host: auto-pairing in progress, no PIN needed
+            showMessage(`Auto-pairing with Backlight host ${this.getCache()?.name}...\nNo PIN required.`, { signal: messageAbort.signal })
         } else if ("Pin" in responseStream.response) {
             // Standard Sunshine: show PIN for manual entry
             showMessage(`Please pair your host ${this.getCache()?.name} with this pin:\nPin: ${responseStream.response.Pin}`, { signal: messageAbort.signal })
@@ -270,9 +280,9 @@ export class Host implements Component {
         if ("Paired" in resultResponse) {
             this.updateCache(resultResponse.Paired, null)
             
-            // Show success message for Fuji auto-pairing
-            if ("FujiAutoPairing" in responseStream.response) {
-                await showMessage(`Successfully auto-paired with Fuji host ${this.getCache()?.name}!`)
+            // Show success message for Backlight auto-pairing
+            if ("BacklightAutoPairing" in responseStream.response) {
+                await showMessage(`Successfully auto-paired with Backlight host ${this.getCache()?.name}!`)
             }
         } else {
             throw `failed to pair: pairing error`
@@ -318,6 +328,14 @@ export class Host implements Component {
             this.imageOverlayElement.src = HOST_OVERLAY_LOCK
         } else {
             this.imageOverlayElement.src = HOST_OVERLAY_NONE
+        }
+
+        // Update badge for Backlight hosts
+        if (isDetailedHost(this.cache) && this.cache.host_type === "Backlight") {
+            this.badgeElement.textContent = "Backlight"
+            this.badgeElement.style.display = "block"
+        } else {
+            this.badgeElement.style.display = "none"
         }
     }
 
