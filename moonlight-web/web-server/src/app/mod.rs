@@ -26,6 +26,7 @@ use crate::app::{
 };
 
 pub mod auth;
+pub mod fuji;
 pub mod host;
 pub mod password;
 pub mod storage;

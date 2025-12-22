@@ -246,7 +246,17 @@ export class Host implements Component {
         }
 
         const messageAbort = new AbortController()
-        showMessage(`Please pair your host ${this.getCache()?.name} with this pin:\nPin: ${responseStream.response.Pin}`, { signal: messageAbort.signal })
+
+        // Check if this is a Fuji host (auto-pairing) or standard Sunshine (PIN required)
+        if ("FujiAutoPairing" in responseStream.response) {
+            // Fuji host: auto-pairing in progress, no PIN needed
+            showMessage(`Auto-pairing with Fuji host ${this.getCache()?.name}...\nNo PIN required.`, { signal: messageAbort.signal })
+        } else if ("Pin" in responseStream.response) {
+            // Standard Sunshine: show PIN for manual entry
+            showMessage(`Please pair your host ${this.getCache()?.name} with this pin:\nPin: ${responseStream.response.Pin}`, { signal: messageAbort.signal })
+        } else {
+            throw `failed to pair: unexpected response format`
+        }
 
         const resultResponse = await responseStream.next()
         messageAbort.abort()
@@ -257,7 +267,16 @@ export class Host implements Component {
             throw `failed to pair (stage 2): ${resultResponse}`
         }
 
-        this.updateCache(resultResponse.Paired, null)
+        if ("Paired" in resultResponse) {
+            this.updateCache(resultResponse.Paired, null)
+            
+            // Show success message for Fuji auto-pairing
+            if ("FujiAutoPairing" in responseStream.response) {
+                await showMessage(`Successfully auto-paired with Fuji host ${this.getCache()?.name}!`)
+            }
+        } else {
+            throw `failed to pair: pairing error`
+        }
     }
 
     getHostId(): number {

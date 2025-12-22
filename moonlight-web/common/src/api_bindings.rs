@@ -171,12 +171,25 @@ pub struct PostPairRequest {
     pub host_id: u32,
 }
 
+/// Fuji host type detection
+#[derive(Serialize, Deserialize, Debug, TS, Clone, Copy, PartialEq, Eq)]
+#[ts(export, export_to = EXPORT_PATH)]
+pub enum HostType {
+    /// Standard Sunshine host - requires manual PIN entry
+    Standard,
+    /// Fuji host - supports OTP auto-pairing
+    Fuji,
+}
+
 #[derive(Serialize, Deserialize, Debug, TS)]
 #[ts(export, export_to = EXPORT_PATH)]
 pub enum PostPairResponse1 {
     InternalServerError,
     PairError,
+    /// Standard Sunshine host - display this PIN to the user
     Pin(String),
+    /// Fuji host - auto-pairing in progress, no PIN needed
+    FujiAutoPairing,
 }
 
 #[derive(Serialize, Deserialize, Debug, TS)]

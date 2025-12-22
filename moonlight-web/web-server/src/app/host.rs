@@ -4,8 +4,8 @@ use std::{
 };
 
 use actix_web::web::Bytes;
-use common::api_bindings::{self, DetailedHost, HostOwner, HostState, PairStatus, UndetailedHost};
-use log::warn;
+use common::api_bindings::{self, DetailedHost, HostOwner, HostState, HostType, PairStatus, UndetailedHost};
+use log::{debug, warn};
 use moonlight_common::{
     PairPin, ServerState,
     high::broadcast_magic_packet,
@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::app::{
     AppError, AppInner, AppRef, MoonlightClient,
+    fuji::{is_fuji_host, request_fuji_otp},
     storage::{StorageHost, StorageHostModify, StorageHostPairInfo},
     user::{AuthenticatedUser, Role, UserId},
 };
@@ -532,6 +533,131 @@ impl Host {
         self.can_use(user).await?;
 
         todo!()
+    }
+
+    /// Detect if this host is a Fuji host (supports OTP auto-pairing)
+    pub async fn detect_host_type(&mut self, user: &mut AuthenticatedUser) -> Result<HostType, AppError> {
+        self.can_use(user).await?;
+
+        let app = self.app.access()?;
+        let info = self
+            .host_info(&app, user)
+            .await?
+            .ok_or(AppError::HostOffline)?;
+
+        let storage = self.storage_host(&app).await?;
+        let https_hostport = Self::build_hostport(&storage.address, info.https_port);
+
+        debug!("Detecting host type for: {}", https_hostport);
+
+        if is_fuji_host(&https_hostport).await {
+            debug!("Host {} detected as Fuji", https_hostport);
+            Ok(HostType::Fuji)
+        } else {
+            debug!("Host {} detected as Standard Sunshine", https_hostport);
+            Ok(HostType::Standard)
+        }
+    }
+
+    /// Auto-pair with a Fuji host using OTP
+    ///
+    /// This requests an OTP from the Fuji host and uses it to complete pairing
+    /// without requiring manual PIN entry.
+    pub async fn pair_fuji(&mut self, user: &mut AuthenticatedUser) -> Result<(), AppError> {
+        self.can_use(user).await?;
+
+        let user_id = user.id();
+        let app = self.app.access()?;
+
+        let info = self
+            .host_info(&app, user)
+            .await?
+            .ok_or(AppError::HostNotFound)?;
+
+        if matches!(info.pair_status.into(), PairStatus::Paired) {
+            return Err(AppError::HostPaired);
+        }
+
+        let storage = self.storage_host(&app).await?;
+        let https_hostport = Self::build_hostport(&storage.address, info.https_port);
+
+        // Request OTP from Fuji
+        let passphrase = Uuid::new_v4().to_string();
+        let device_name = &app.config.moonlight.pair_device_name;
+
+        let otp = request_fuji_otp(&https_hostport, &passphrase, device_name)
+            .await
+            .map_err(|e| {
+                warn!("Failed to request Fuji OTP: {e}");
+                AppError::MoonlightApi(ApiError::InvalidResponse)
+            })?;
+
+        // Parse the OTP PIN as a PairPin
+        let pin = PairPin::from_string(&otp.pin).map_err(|_| {
+            warn!("Invalid OTP PIN format from Fuji: {}", otp.pin);
+            AppError::MoonlightApi(ApiError::InvalidResponse)
+        })?;
+
+        debug!("Received Fuji OTP, proceeding with auto-pairing");
+
+        // Now use the standard pairing flow with the OTP PIN
+        let modify = self
+            .use_client(
+                &app,
+                user,
+                true,
+                async |this, _https_capable, client, host, port, client_info| {
+                    let auth = generate_new_client()?;
+
+                    let https_address = Self::build_hostport(host, info.https_port);
+
+                    let PairSuccess { server_certificate, mut client } = host_pair(
+                        client,
+                        &Self::build_hostport(host, port),
+                        &https_address,
+                        client_info,
+                        &auth.private_key,
+                        &auth.certificate,
+                        &app.config.moonlight.pair_device_name,
+                        info.app_version,
+                        pin,
+                    )
+                    .await?;
+
+                    // Store pair info
+                    let (name, mac) = match host_info(
+                        &mut client,
+                        true,
+                        &Self::build_hostport(host, info.https_port),
+                        Some(client_info),
+                    )
+                    .await
+                    {
+                        Ok(info) => {
+                            this.cache_host_info = Some((user_id, info.clone()));
+                            (Some(info.host_name), Some(info.mac))
+                        }
+                        Err(err) => {
+                            warn!("Failed to make https request to host {this:?} after Fuji pairing completed: {err}");
+                            (None, None)
+                        }
+                    };
+
+                    Ok::<_, AppError>(StorageHostModify {
+                        pair_info: Some(Some(StorageHostPairInfo {
+                            client_private_key: auth.private_key,
+                            client_certificate: auth.certificate,
+                            server_certificate,
+                        })),
+                        cache_name: name,
+                        cache_mac: mac,
+                        ..Default::default()
+                    })
+                },
+            )
+            .await??;
+
+        self.modify(user, modify).await
     }
 
     pub async fn wake(&self, user: &mut AuthenticatedUser) -> Result<(), AppError> {

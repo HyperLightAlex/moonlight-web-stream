@@ -197,42 +197,85 @@ async fn pair_host(
     mut user: AuthenticatedUser,
     Json(request): Json<PostPairRequest>,
 ) -> Result<StreamedResponse<PostPairResponse1, PostPairResponse2>, AppError> {
+    use common::api_bindings::HostType;
+
     let host_id = HostId(request.host_id);
 
     let mut host = user.host(host_id).await?;
 
-    let pin = PairPin::generate()?;
+    // Detect if this is a Fuji host
+    let host_type = host.detect_host_type(&mut user).await.unwrap_or(HostType::Standard);
 
-    let (stream_response, stream_sender) =
-        StreamedResponse::new(PostPairResponse1::Pin(pin.to_string()));
+    match host_type {
+        HostType::Fuji => {
+            // Fuji host: auto-pair using OTP (no PIN needed)
+            let (stream_response, stream_sender) =
+                StreamedResponse::new(PostPairResponse1::FujiAutoPairing);
 
-    spawn(async move {
-        let result = host.pair(&mut user, pin).await;
+            spawn(async move {
+                let result = host.pair_fuji(&mut user).await;
 
-        let result = match result {
-            Ok(()) => host.detailed_host(&mut user).await,
-            Err(err) => Err(err),
-        };
+                let result = match result {
+                    Ok(()) => host.detailed_host(&mut user).await,
+                    Err(err) => Err(err),
+                };
 
-        match result {
-            Ok(detailed_host) => {
-                if let Err(err) = stream_sender
-                    .send(PostPairResponse2::Paired(detailed_host))
-                    .await
-                {
-                    warn!("Failed to send pair success: {err:?}");
+                match result {
+                    Ok(detailed_host) => {
+                        if let Err(err) = stream_sender
+                            .send(PostPairResponse2::Paired(detailed_host))
+                            .await
+                        {
+                            warn!("Failed to send Fuji pair success: {err:?}");
+                        }
+                    }
+                    Err(err) => {
+                        warn!("Failed to Fuji auto-pair host: {err}");
+                        if let Err(err) = stream_sender.send(PostPairResponse2::PairError).await {
+                            warn!("Failed to send Fuji pair failure: {err:?}");
+                        }
+                    }
                 }
-            }
-            Err(err) => {
-                warn!("Failed to pair host: {err}");
-                if let Err(err) = stream_sender.send(PostPairResponse2::PairError).await {
-                    warn!("Failed to send pair failure: {err:?}");
-                }
-            }
+            });
+
+            Ok(stream_response)
         }
-    });
+        HostType::Standard => {
+            // Standard Sunshine: use PIN-based pairing
+            let pin = PairPin::generate()?;
 
-    Ok(stream_response)
+            let (stream_response, stream_sender) =
+                StreamedResponse::new(PostPairResponse1::Pin(pin.to_string()));
+
+            spawn(async move {
+                let result = host.pair(&mut user, pin).await;
+
+                let result = match result {
+                    Ok(()) => host.detailed_host(&mut user).await,
+                    Err(err) => Err(err),
+                };
+
+                match result {
+                    Ok(detailed_host) => {
+                        if let Err(err) = stream_sender
+                            .send(PostPairResponse2::Paired(detailed_host))
+                            .await
+                        {
+                            warn!("Failed to send pair success: {err:?}");
+                        }
+                    }
+                    Err(err) => {
+                        warn!("Failed to pair host: {err}");
+                        if let Err(err) = stream_sender.send(PostPairResponse2::PairError).await {
+                            warn!("Failed to send pair failure: {err:?}");
+                        }
+                    }
+                }
+            });
+
+            Ok(stream_response)
+        }
+    }
 }
 
 #[post("/host/wake")]
