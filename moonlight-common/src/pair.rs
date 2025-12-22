@@ -198,6 +198,9 @@ pub enum PairError<RequestError> {
     Failed,
 }
 
+// Re-export OtpCredentials from network::pair
+pub use crate::network::pair::OtpCredentials;
+
 pub async fn host_pair<C: RequestClient>(
     client: &mut C,
     http_address: &str,
@@ -208,6 +211,33 @@ pub async fn host_pair<C: RequestClient>(
     device_name: &str,
     server_version: ServerVersion,
     pin: PairPin,
+) -> Result<PairSuccess<C>, PairError<C::Error>> {
+    host_pair_with_otp(
+        client,
+        http_address,
+        https_address,
+        client_info,
+        client_private_key_pem,
+        client_certificate_pem,
+        device_name,
+        server_version,
+        pin,
+        None,
+    )
+    .await
+}
+
+pub async fn host_pair_with_otp<C: RequestClient>(
+    client: &mut C,
+    http_address: &str,
+    https_address: &str,
+    client_info: ClientInfo<'_>,
+    client_private_key_pem: &Pem,
+    client_certificate_pem: &Pem,
+    device_name: &str,
+    server_version: ServerVersion,
+    pin: PairPin,
+    otp: Option<OtpCredentials<'_>>,
 ) -> Result<PairSuccess<C>, PairError<C::Error>> {
     let client_cert = X509::from_der(client_certificate_pem.contents())?;
     let client_private_key = PKey::private_key_from_der(client_private_key_pem.contents())?;
@@ -225,6 +255,9 @@ pub async fn host_pair<C: RequestClient>(
 
     let aes_key = generate_aes_key(hash_algorithm, salt, pin);
 
+    // OtpCredentials is already the network::pair type, just pass it through
+    let network_otp = otp;
+
     let server_response1 = host_pair1(
         client,
         http_address,
@@ -233,6 +266,7 @@ pub async fn host_pair<C: RequestClient>(
             device_name,
             salt,
             client_cert_pem: client_cert_pem.as_bytes(),
+            otp: network_otp,
         },
     )
     .await?;

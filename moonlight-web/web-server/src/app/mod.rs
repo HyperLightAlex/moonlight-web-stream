@@ -26,6 +26,7 @@ use crate::app::{
 };
 
 pub mod auth;
+pub mod fuji;
 pub mod host;
 pub mod password;
 pub mod storage;
@@ -87,6 +88,8 @@ pub enum AppError {
     MoonlightApi(#[from] ApiError<<MoonlightClient as RequestClient>::Error>),
     #[error("pairing error: {0}")]
     Pairing(#[from] PairError<<MoonlightClient as RequestClient>::Error>),
+    #[error("fuji pairing failed: {0}")]
+    FujiPairingFailed(String),
 }
 
 impl ResponseError for AppError {
@@ -117,6 +120,7 @@ impl ResponseError for AppError {
             Self::MoonlightApi(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Pairing(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::FujiPairingFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }

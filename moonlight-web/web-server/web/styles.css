@@ -563,6 +563,20 @@ input[type=number] {
     text-align: center;
 }
 
+.host-badge {
+    display: block;
+    background-color: #7c4dff;
+    color: white;
+    font-size: 0.8rem;
+    font-weight: bold;
+    padding: 4px 10px;
+    border-radius: 12px;
+    margin: 8px auto 0 auto;
+    width: fit-content;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
 /** Apps */
 .app-list {
     list-style-type: none;

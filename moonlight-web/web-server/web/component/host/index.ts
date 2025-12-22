@@ -20,6 +20,7 @@ export class Host implements Component {
     private imageElement: HTMLImageElement = document.createElement("img")
     private imageOverlayElement: HTMLImageElement = document.createElement("img")
     private nameElement: HTMLElement = document.createElement("p")
+    private badgeElement: HTMLSpanElement = document.createElement("span")
 
     constructor(api: Api, hostId: number, host: UndetailedHost | DetailedHost | null) {
         this.api = api
@@ -37,10 +38,15 @@ export class Host implements Component {
         // Configure name
         this.nameElement.classList.add("host-name")
 
+        // Configure badge (for Backlight hosts)
+        this.badgeElement.classList.add("host-badge")
+        this.badgeElement.style.display = "none"
+
         // Append elements
         this.divElement.appendChild(this.imageElement)
         this.divElement.appendChild(this.imageOverlayElement)
         this.divElement.appendChild(this.nameElement)
+        this.divElement.appendChild(this.badgeElement)
 
         this.divElement.addEventListener("click", this.onClick.bind(this))
         this.divElement.addEventListener("contextmenu", this.onContextMenu.bind(this))
@@ -154,9 +160,13 @@ export class Host implements Component {
         }
         this.updateCache(host, this.userCache)
 
+        const hostTypeDisplay = host.host_type === "Backlight" ? "Backlight" : 
+                                host.host_type === "Standard" ? "Standard Sunshine" : "Unknown";
+        
         await showMessage(
             `Web Id: ${host.host_id}\n` +
             `Name: ${host.name}\n` +
+            `Host Type: ${hostTypeDisplay}\n` +
             `Pair Status: ${host.paired}\n` +
             `State: ${host.server_state}\n` +
             `Address: ${host.address}\n` +
@@ -241,12 +251,21 @@ export class Host implements Component {
             host_id: this.getHostId()
         })
 
-        if (typeof responseStream.response == "string") {
-            throw `failed to pair (stage 1): ${responseStream.response}`
-        }
-
         const messageAbort = new AbortController()
-        showMessage(`Please pair your host ${this.getCache()?.name} with this pin:\nPin: ${responseStream.response.Pin}`, { signal: messageAbort.signal })
+
+        // Check if this is a Backlight host (auto-pairing) or standard Sunshine (PIN required)
+        // Note: Unit variants serialize as strings, tuple variants as objects
+        if (responseStream.response === "BacklightAutoPairing") {
+            // Backlight host: auto-pairing in progress, no PIN needed
+            showMessage(`Auto-pairing with Backlight host ${this.getCache()?.name}...\nNo PIN required.`, { signal: messageAbort.signal })
+        } else if (typeof responseStream.response === "object" && "Pin" in responseStream.response) {
+            // Standard Sunshine: show PIN for manual entry
+            showMessage(`Please pair your host ${this.getCache()?.name} with this pin:\nPin: ${responseStream.response.Pin}`, { signal: messageAbort.signal })
+        } else if (responseStream.response === "InternalServerError" || responseStream.response === "PairError") {
+            throw `failed to pair (stage 1): ${responseStream.response}`
+        } else {
+            throw `failed to pair: unexpected response format: ${JSON.stringify(responseStream.response)}`
+        }
 
         const resultResponse = await responseStream.next()
         messageAbort.abort()
@@ -257,7 +276,16 @@ export class Host implements Component {
             throw `failed to pair (stage 2): ${resultResponse}`
         }
 
-        this.updateCache(resultResponse.Paired, null)
+        if (typeof resultResponse === "object" && "Paired" in resultResponse) {
+            this.updateCache(resultResponse.Paired, null)
+            
+            // Show success message for Backlight auto-pairing
+            if (responseStream.response === "BacklightAutoPairing") {
+                await showMessage(`Successfully auto-paired with Backlight host ${this.getCache()?.name}!`)
+            }
+        } else {
+            throw `failed to pair: pairing error`
+        }
     }
 
     getHostId(): number {
@@ -299,6 +327,14 @@ export class Host implements Component {
             this.imageOverlayElement.src = HOST_OVERLAY_LOCK
         } else {
             this.imageOverlayElement.src = HOST_OVERLAY_NONE
+        }
+
+        // Update badge for Backlight hosts
+        if (isDetailedHost(this.cache) && this.cache.host_type === "Backlight") {
+            this.badgeElement.textContent = "Backlight"
+            this.badgeElement.style.display = "block"
+        } else {
+            this.badgeElement.style.display = "none"
         }
     }
 

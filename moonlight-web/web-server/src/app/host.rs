@@ -4,8 +4,8 @@ use std::{
 };
 
 use actix_web::web::Bytes;
-use common::api_bindings::{self, DetailedHost, HostOwner, HostState, PairStatus, UndetailedHost};
-use log::warn;
+use common::api_bindings::{self, DetailedHost, HostOwner, HostState, HostType, PairStatus, UndetailedHost};
+use log::{debug, warn};
 use moonlight_common::{
     PairPin, ServerState,
     high::broadcast_magic_packet,
@@ -14,15 +14,30 @@ use moonlight_common::{
         host_app_list, host_cancel, host_info,
         request_client::{RequestClient, RequestError},
     },
-    pair::{PairSuccess, generate_new_client, host_pair},
+    pair::{PairSuccess, generate_new_client, host_pair, host_pair_with_otp, OtpCredentials},
 };
 use uuid::Uuid;
 
 use crate::app::{
     AppError, AppInner, AppRef, MoonlightClient,
+    fuji::request_fuji_otp,
     storage::{StorageHost, StorageHostModify, StorageHostPairInfo},
     user::{AuthenticatedUser, Role, UserId},
 };
+
+/// Parse a 4-digit PIN string (e.g., "1234") into a PairPin
+fn parse_pin_string(pin_str: &str) -> Option<PairPin> {
+    let digits: Vec<u8> = pin_str
+        .chars()
+        .filter_map(|c| c.to_digit(10).map(|d| d as u8))
+        .collect();
+
+    if digits.len() == 4 {
+        PairPin::from_array([digits[0], digits[1], digits[2], digits[3]])
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HostId(pub u32);
@@ -383,12 +398,20 @@ impl Host {
                     }
                 };
 
+                // Detect host type (Backlight vs Standard Sunshine) from serverinfo tags
+                let host_type = if info.is_backlight {
+                    Some(HostType::Backlight)
+                } else {
+                    Some(HostType::Standard)
+                };
+
                 Ok(DetailedHost {
                     host_id: self.id.0,
                     owner,
                     name: info.host_name,
                     paired: info.pair_status.into(),
                     server_state: server_state.map(HostState::from),
+                    host_type,
                     address: storage.address,
                     http_port: storage.http_port,
                     https_port: info.https_port,
@@ -416,6 +439,7 @@ impl Host {
                     name: storage.cache.name,
                     paired,
                     server_state: None,
+                    host_type: None,
                     address: storage.address,
                     http_port: storage.http_port,
                     https_port: 0,
@@ -532,6 +556,158 @@ impl Host {
         self.can_use(user).await?;
 
         todo!()
+    }
+
+    /// Detect if this host is a Backlight host (supports OTP auto-pairing)
+    pub async fn detect_host_type(&mut self, user: &mut AuthenticatedUser) -> Result<HostType, AppError> {
+        self.can_use(user).await?;
+
+        let app = self.app.access()?;
+        let info = self
+            .host_info(&app, user)
+            .await?
+            .ok_or(AppError::HostOffline)?;
+
+        debug!("Detecting host type, is_backlight={}", info.is_backlight);
+
+        if info.is_backlight {
+            debug!("Host detected as Backlight");
+            Ok(HostType::Backlight)
+        } else {
+            debug!("Host detected as Standard Sunshine");
+            Ok(HostType::Standard)
+        }
+    }
+
+    /// Auto-pair with a Backlight host using OTP
+    ///
+    /// This requests an OTP from the Backlight host and uses it to complete pairing
+    /// without requiring manual PIN entry.
+    pub async fn pair_fuji(&mut self, user: &mut AuthenticatedUser) -> Result<(), AppError> {
+        self.can_use(user).await?;
+
+        let user_id = user.id();
+        let app = self.app.access()?;
+
+        let info = self
+            .host_info(&app, user)
+            .await?
+            .ok_or(AppError::HostNotFound)?;
+
+        if matches!(info.pair_status.into(), PairStatus::Paired) {
+            return Err(AppError::HostPaired);
+        }
+
+        let storage = self.storage_host(&app).await?;
+        
+        // Backlight OTP endpoint is on HTTP port + 1 (e.g., 48989 + 1 = 48990)
+        let otp_port = storage.http_port + 1;
+        let otp_hostport = Self::build_hostport(&storage.address, otp_port);
+        debug!("Requesting OTP from Backlight at: {}", otp_hostport);
+
+        // Request OTP from Backlight
+        let passphrase = Uuid::new_v4().to_string();
+        let device_name = &app.config.moonlight.pair_device_name;
+
+        let otp = request_fuji_otp(&otp_hostport, &passphrase, device_name)
+            .await
+            .map_err(|e| {
+                warn!("Failed to request Backlight OTP: {e}");
+                AppError::FujiPairingFailed(format!("OTP request failed: {e}"))
+            })?;
+
+        // Store the PIN string for API submission
+        let pin_string = otp.pin.clone();
+
+        // Parse the OTP PIN as a PairPin (expects 4 digit string like "1234")
+        let pin = parse_pin_string(&otp.pin).ok_or_else(|| {
+            warn!("Invalid OTP PIN format from Backlight: {}", otp.pin);
+            AppError::FujiPairingFailed(format!("Invalid PIN format: {}", otp.pin))
+        })?;
+
+        debug!("Received Backlight OTP (PIN: {}), proceeding with auto-pairing", pin_string);
+        log::info!("Backlight auto-pairing: PIN={}, passphrase={}", pin_string, passphrase);
+
+        // Now use the OTP pairing flow which uses /autopair endpoint with otpauth hash
+        let modify = self
+            .use_client(
+                &app,
+                user,
+                true,
+                async |this, _https_capable, client, host, port, client_info| {
+                    let auth = generate_new_client()?;
+
+                    let https_address = Self::build_hostport(host, info.https_port);
+                    let http_address = Self::build_hostport(host, port);
+                    
+                    log::info!("Backlight pairing to http={} https={}", http_address, https_address);
+
+                    // Use OTP credentials for auto-pairing
+                    let otp_creds = OtpCredentials {
+                        pin: &pin_string,
+                        passphrase: &passphrase,
+                    };
+
+                    log::info!("Calling host_pair_with_otp with OTP credentials...");
+                    let result = host_pair_with_otp(
+                        client,
+                        &http_address,
+                        &https_address,
+                        client_info,
+                        &auth.private_key,
+                        &auth.certificate,
+                        &app.config.moonlight.pair_device_name,
+                        info.app_version,
+                        pin,
+                        Some(otp_creds),
+                    )
+                    .await;
+                    
+                    let PairSuccess { server_certificate, mut client } = match result {
+                        Ok(success) => {
+                            log::info!("Backlight pairing succeeded!");
+                            success
+                        }
+                        Err(e) => {
+                            log::error!("Backlight pairing failed: {:?}", e);
+                            return Err(e.into());
+                        }
+                    };
+
+                    // Store pair info
+                    let (name, mac) = match host_info(
+                        &mut client,
+                        true,
+                        &Self::build_hostport(host, info.https_port),
+                        Some(client_info),
+                    )
+                    .await
+                    {
+                        Ok(info) => {
+                            this.cache_host_info = Some((user_id, info.clone()));
+                            (Some(info.host_name), Some(info.mac))
+                        }
+                        Err(err) => {
+                            warn!("Failed to make https request to host {this:?} after Backlight pairing completed: {err}");
+                            (None, None)
+                        }
+                    };
+
+                    Ok::<_, AppError>(StorageHostModify {
+                        pair_info: Some(Some(StorageHostPairInfo {
+                            client_private_key: auth.private_key,
+                            client_certificate: auth.certificate,
+                            server_certificate,
+                        })),
+                        cache_name: name,
+                        cache_mac: mac,
+                        ..Default::default()
+                    })
+                },
+            )
+            .await??;
+
+        self.modify(user, modify).await
     }
 
     pub async fn wake(&self, user: &mut AuthenticatedUser) -> Result<(), AppError> {

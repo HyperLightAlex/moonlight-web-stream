@@ -86,6 +86,7 @@ pub struct DetailedHost {
     pub name: String,
     pub paired: PairStatus,
     pub server_state: Option<HostState>,
+    pub host_type: Option<HostType>,
     pub address: String,
     pub http_port: u16,
     pub https_port: u16,
@@ -171,12 +172,25 @@ pub struct PostPairRequest {
     pub host_id: u32,
 }
 
+/// Host type detection (Standard Sunshine vs Backlight)
+#[derive(Serialize, Deserialize, Debug, TS, Clone, Copy, PartialEq, Eq)]
+#[ts(export, export_to = EXPORT_PATH)]
+pub enum HostType {
+    /// Standard Sunshine host - requires manual PIN entry
+    Standard,
+    /// Backlight host - supports OTP auto-pairing
+    Backlight,
+}
+
 #[derive(Serialize, Deserialize, Debug, TS)]
 #[ts(export, export_to = EXPORT_PATH)]
 pub enum PostPairResponse1 {
     InternalServerError,
     PairError,
+    /// Standard Sunshine host - display this PIN to the user
     Pin(String),
+    /// Backlight host - auto-pairing in progress, no PIN needed
+    BacklightAutoPairing,
 }
 
 #[derive(Serialize, Deserialize, Debug, TS)]

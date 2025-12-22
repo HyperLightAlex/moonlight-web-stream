@@ -13,11 +13,20 @@ use crate::{
     },
 };
 
+/// OTP credentials for Backlight/Fuji auto-pairing
+#[derive(Debug, Clone)]
+pub struct OtpCredentials<'a> {
+    pub pin: &'a str,
+    pub passphrase: &'a str,
+}
+
 #[derive(Debug, Clone)]
 pub struct ClientPairRequest1<'a> {
     pub device_name: &'a str,
     pub salt: [u8; SALT_LENGTH],
     pub client_cert_pem: &'a [u8],
+    /// OTP credentials for Backlight auto-pairing (optional)
+    pub otp: Option<OtpCredentials<'a>>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,7 +41,7 @@ pub async fn host_pair1<C: RequestClient>(
     info: ClientInfo<'_>,
     request: ClientPairRequest1<'_>,
 ) -> Result<HostPairResponse1, ApiError<C::Error>> {
-    let mut query_params = LocalQueryParams::<{ 2 + 7 }>::default();
+    let mut query_params = LocalQueryParams::<{ 2 + 8 }>::default();
 
     let mut uuid_bytes = [0; Hyphenated::LENGTH];
     info.add_query_params(&mut uuid_bytes, &mut query_params);
@@ -49,8 +58,30 @@ pub async fn host_pair1<C: RequestClient>(
     let client_cert_pem_str = hex::encode_upper(request.client_cert_pem);
     query_params.push(query_param("clientcert", &client_cert_pem_str));
 
+    // Calculate OTP auth if available (need to do this before adding to query_params)
+    let otp_auth_str = if let Some(otp) = &request.otp {
+        // For Backlight/Fuji: Calculate otpauth hash = SHA256(pin + salt_hex + passphrase)
+        use openssl::sha::sha256;
+        let mut input = Vec::new();
+        input.extend_from_slice(otp.pin.as_bytes());
+        input.extend_from_slice(salt_str.as_bytes()); // Salt as hex string, not raw bytes
+        input.extend_from_slice(otp.passphrase.as_bytes());
+        let hash = sha256(&input);
+        Some(hex::encode_upper(hash))
+    } else {
+        None
+    };
+
+    // Determine endpoint and add OTP auth if available
+    let endpoint = if let Some(ref auth_str) = otp_auth_str {
+        query_params.push(query_param("otpauth", auth_str));
+        "autopair" // Use autopair endpoint for OTP
+    } else {
+        "pair" // Standard pair endpoint
+    };
+
     let response = client
-        .send_http_request_text_response(http_hostport, "pair", &query_params)
+        .send_http_request_text_response(http_hostport, endpoint, &query_params)
         .await
         .map_err(ApiError::RequestClient)?;
 
