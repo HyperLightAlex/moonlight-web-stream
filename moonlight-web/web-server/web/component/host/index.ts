@@ -251,21 +251,20 @@ export class Host implements Component {
             host_id: this.getHostId()
         })
 
-        if (typeof responseStream.response == "string") {
-            throw `failed to pair (stage 1): ${responseStream.response}`
-        }
-
         const messageAbort = new AbortController()
 
         // Check if this is a Backlight host (auto-pairing) or standard Sunshine (PIN required)
-        if ("BacklightAutoPairing" in responseStream.response) {
+        // Note: Unit variants serialize as strings, tuple variants as objects
+        if (responseStream.response === "BacklightAutoPairing") {
             // Backlight host: auto-pairing in progress, no PIN needed
             showMessage(`Auto-pairing with Backlight host ${this.getCache()?.name}...\nNo PIN required.`, { signal: messageAbort.signal })
-        } else if ("Pin" in responseStream.response) {
+        } else if (typeof responseStream.response === "object" && "Pin" in responseStream.response) {
             // Standard Sunshine: show PIN for manual entry
             showMessage(`Please pair your host ${this.getCache()?.name} with this pin:\nPin: ${responseStream.response.Pin}`, { signal: messageAbort.signal })
+        } else if (responseStream.response === "InternalServerError" || responseStream.response === "PairError") {
+            throw `failed to pair (stage 1): ${responseStream.response}`
         } else {
-            throw `failed to pair: unexpected response format`
+            throw `failed to pair: unexpected response format: ${JSON.stringify(responseStream.response)}`
         }
 
         const resultResponse = await responseStream.next()
@@ -277,11 +276,11 @@ export class Host implements Component {
             throw `failed to pair (stage 2): ${resultResponse}`
         }
 
-        if ("Paired" in resultResponse) {
+        if (typeof resultResponse === "object" && "Paired" in resultResponse) {
             this.updateCache(resultResponse.Paired, null)
             
             // Show success message for Backlight auto-pairing
-            if ("BacklightAutoPairing" in responseStream.response) {
+            if (responseStream.response === "BacklightAutoPairing") {
                 await showMessage(`Successfully auto-paired with Backlight host ${this.getCache()?.name}!`)
             }
         } else {

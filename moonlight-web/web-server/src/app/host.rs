@@ -14,13 +14,13 @@ use moonlight_common::{
         host_app_list, host_cancel, host_info,
         request_client::{RequestClient, RequestError},
     },
-    pair::{PairSuccess, generate_new_client, host_pair},
+    pair::{PairSuccess, generate_new_client, host_pair, host_pair_with_otp, OtpCredentials},
 };
 use uuid::Uuid;
 
 use crate::app::{
     AppError, AppInner, AppRef, MoonlightClient,
-    fuji::{is_fuji_host, request_fuji_otp},
+    fuji::request_fuji_otp,
     storage::{StorageHost, StorageHostModify, StorageHostPairInfo},
     user::{AuthenticatedUser, Role, UserId},
 };
@@ -398,9 +398,8 @@ impl Host {
                     }
                 };
 
-                // Detect host type (Backlight vs Standard Sunshine)
-                let https_hostport = Self::build_hostport(&storage.address, info.https_port);
-                let host_type = if is_fuji_host(&https_hostport).await {
+                // Detect host type (Backlight vs Standard Sunshine) from serverinfo tags
+                let host_type = if info.is_backlight {
                     Some(HostType::Backlight)
                 } else {
                     Some(HostType::Standard)
@@ -569,16 +568,13 @@ impl Host {
             .await?
             .ok_or(AppError::HostOffline)?;
 
-        let storage = self.storage_host(&app).await?;
-        let https_hostport = Self::build_hostport(&storage.address, info.https_port);
+        debug!("Detecting host type, is_backlight={}", info.is_backlight);
 
-        debug!("Detecting host type for: {}", https_hostport);
-
-        if is_fuji_host(&https_hostport).await {
-            debug!("Host {} detected as Backlight", https_hostport);
+        if info.is_backlight {
+            debug!("Host detected as Backlight");
             Ok(HostType::Backlight)
         } else {
-            debug!("Host {} detected as Standard Sunshine", https_hostport);
+            debug!("Host detected as Standard Sunshine");
             Ok(HostType::Standard)
         }
     }
@@ -603,18 +599,25 @@ impl Host {
         }
 
         let storage = self.storage_host(&app).await?;
-        let https_hostport = Self::build_hostport(&storage.address, info.https_port);
+        
+        // Backlight OTP endpoint is on HTTP port + 1 (e.g., 48989 + 1 = 48990)
+        let otp_port = storage.http_port + 1;
+        let otp_hostport = Self::build_hostport(&storage.address, otp_port);
+        debug!("Requesting OTP from Backlight at: {}", otp_hostport);
 
         // Request OTP from Backlight
         let passphrase = Uuid::new_v4().to_string();
         let device_name = &app.config.moonlight.pair_device_name;
 
-        let otp = request_fuji_otp(&https_hostport, &passphrase, device_name)
+        let otp = request_fuji_otp(&otp_hostport, &passphrase, device_name)
             .await
             .map_err(|e| {
                 warn!("Failed to request Backlight OTP: {e}");
                 AppError::FujiPairingFailed(format!("OTP request failed: {e}"))
             })?;
+
+        // Store the PIN string for API submission
+        let pin_string = otp.pin.clone();
 
         // Parse the OTP PIN as a PairPin (expects 4 digit string like "1234")
         let pin = parse_pin_string(&otp.pin).ok_or_else(|| {
@@ -622,9 +625,10 @@ impl Host {
             AppError::FujiPairingFailed(format!("Invalid PIN format: {}", otp.pin))
         })?;
 
-        debug!("Received Backlight OTP, proceeding with auto-pairing");
+        debug!("Received Backlight OTP (PIN: {}), proceeding with auto-pairing", pin_string);
+        log::info!("Backlight auto-pairing: PIN={}, passphrase={}", pin_string, passphrase);
 
-        // Now use the standard pairing flow with the OTP PIN
+        // Now use the OTP pairing flow which uses /autopair endpoint with otpauth hash
         let modify = self
             .use_client(
                 &app,
@@ -634,10 +638,20 @@ impl Host {
                     let auth = generate_new_client()?;
 
                     let https_address = Self::build_hostport(host, info.https_port);
+                    let http_address = Self::build_hostport(host, port);
+                    
+                    log::info!("Backlight pairing to http={} https={}", http_address, https_address);
 
-                    let PairSuccess { server_certificate, mut client } = host_pair(
+                    // Use OTP credentials for auto-pairing
+                    let otp_creds = OtpCredentials {
+                        pin: &pin_string,
+                        passphrase: &passphrase,
+                    };
+
+                    log::info!("Calling host_pair_with_otp with OTP credentials...");
+                    let result = host_pair_with_otp(
                         client,
-                        &Self::build_hostport(host, port),
+                        &http_address,
                         &https_address,
                         client_info,
                         &auth.private_key,
@@ -645,8 +659,20 @@ impl Host {
                         &app.config.moonlight.pair_device_name,
                         info.app_version,
                         pin,
+                        Some(otp_creds),
                     )
-                    .await?;
+                    .await;
+                    
+                    let PairSuccess { server_certificate, mut client } = match result {
+                        Ok(success) => {
+                            log::info!("Backlight pairing succeeded!");
+                            success
+                        }
+                        Err(e) => {
+                            log::error!("Backlight pairing failed: {:?}", e);
+                            return Err(e.into());
+                        }
+                    };
 
                     // Store pair info
                     let (name, mac) = match host_info(

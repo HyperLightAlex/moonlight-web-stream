@@ -123,3 +123,58 @@ pub async fn request_fuji_otp(
     Ok(otp)
 }
 
+/// Submit PIN to Sunshine API to confirm pairing
+///
+/// This simulates the user entering the PIN on the Sunshine web UI.
+/// Must be called after a pairing request has been initiated.
+pub async fn submit_fuji_pin(
+    https_hostport: &str,
+    pin: &str,
+    client_name: &str,
+) -> Result<(), FujiError> {
+    use log::info;
+    
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let url = format!("https://{}/api/pin", https_hostport);
+
+    info!("Submitting PIN {} to Backlight API at: {}", pin, url);
+
+    let body = serde_json::json!({
+        "pin": pin,
+        "name": client_name
+    });
+    info!("Request body: {}", body);
+
+    let response = client
+        .post(&url)
+        .basic_auth(FUJI_DEFAULT_USERNAME, Some(FUJI_DEFAULT_PASSWORD))
+        .json(&body)
+        .send()
+        .await?;
+
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    
+    info!("PIN submission response: status={}, body={}", status, body_text);
+
+    if !status.is_success() {
+        warn!("PIN submission failed with status {}: {}", status.as_u16(), body_text);
+        return Err(FujiError::OtpFailed(status.as_u16()));
+    }
+
+    // Check if the PIN was actually accepted
+    // Sunshine returns {"status":true} on success, {"status":false} if no pairing pending
+    if body_text.contains("\"status\":true") || body_text.contains("\"status\": true") {
+        info!("PIN accepted by Backlight - pairing confirmed!");
+        Ok(())
+    } else {
+        // PIN submission succeeded but no pairing was pending
+        info!("PIN submitted but no pairing pending (status:false)");
+        Err(FujiError::OtpFailed(0)) // Use 0 to indicate "no pairing pending"
+    }
+}
+

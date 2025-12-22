@@ -140,6 +140,8 @@ pub struct HostInfo {
     pub current_game: u32,
     pub state_string: String,
     pub state: ServerState,
+    /// True if this is a Backlight host (has FujiSunshine or BacklightVersion in serverinfo)
+    pub is_backlight: bool,
 }
 
 pub async fn host_info<C: RequestClient>(
@@ -172,6 +174,14 @@ pub async fn host_info<C: RequestClient>(
 
     let state_string = xml_child_text::<C>(root, "state")?.to_string();
 
+    // Check if this is a Backlight host by looking for FujiSunshine or BacklightVersion tags
+    let is_backlight = root
+        .children()
+        .any(|node| {
+            let name = node.tag_name().name();
+            name == "FujiSunshine" || name == "BacklightVersion"
+        });
+
     Ok(HostInfo {
         host_name: xml_child_text::<C>(root, "hostname")?.to_string(),
         app_version: xml_child_text::<C>(root, "appversion")?.parse()?,
@@ -194,6 +204,7 @@ pub async fn host_info<C: RequestClient>(
         current_game: xml_child_text::<C>(root, "currentgame")?.parse()?,
         state: ServerState::from_str(&state_string)?,
         state_string,
+        is_backlight,
     })
 }
 
