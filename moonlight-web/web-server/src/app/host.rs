@@ -25,6 +25,20 @@ use crate::app::{
     user::{AuthenticatedUser, Role, UserId},
 };
 
+/// Parse a 4-digit PIN string (e.g., "1234") into a PairPin
+fn parse_pin_string(pin_str: &str) -> Option<PairPin> {
+    let digits: Vec<u8> = pin_str
+        .chars()
+        .filter_map(|c| c.to_digit(10).map(|d| d as u8))
+        .collect();
+
+    if digits.len() == 4 {
+        PairPin::from_array([digits[0], digits[1], digits[2], digits[3]])
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HostId(pub u32);
 
@@ -589,13 +603,13 @@ impl Host {
             .await
             .map_err(|e| {
                 warn!("Failed to request Fuji OTP: {e}");
-                AppError::MoonlightApi(ApiError::InvalidResponse)
+                AppError::FujiPairingFailed(format!("OTP request failed: {e}"))
             })?;
 
-        // Parse the OTP PIN as a PairPin
-        let pin = PairPin::from_string(&otp.pin).map_err(|_| {
+        // Parse the OTP PIN as a PairPin (expects 4 digit string like "1234")
+        let pin = parse_pin_string(&otp.pin).ok_or_else(|| {
             warn!("Invalid OTP PIN format from Fuji: {}", otp.pin);
-            AppError::MoonlightApi(ApiError::InvalidResponse)
+            AppError::FujiPairingFailed(format!("Invalid PIN format: {}", otp.pin))
         })?;
 
         debug!("Received Fuji OTP, proceeding with auto-pairing");
