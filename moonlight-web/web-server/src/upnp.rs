@@ -4,17 +4,17 @@
 //! on compatible routers using the UPnP IGD (Internet Gateway Device) protocol.
 
 use std::{
-    net::{Ipv4Addr, SocketAddrV4},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::Arc,
     time::Duration,
 };
 
 use common::config::{PortRange, UpnpConfig};
 use igd_next::{
-    aio::tokio::Tokio,
-    Gateway, PortMappingProtocol, SearchOptions,
+    aio::{tokio::Tokio, Gateway},
+    PortMappingProtocol, SearchOptions,
 };
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use tokio::sync::RwLock;
 
 /// Result of a UPnP port mapping attempt
@@ -49,7 +49,7 @@ pub struct UpnpManager {
     server_port: u16,
     local_ip: Ipv4Addr,
     status: Arc<RwLock<UpnpStatus>>,
-    gateway: Arc<RwLock<Option<Gateway>>>,
+    gateway: Arc<RwLock<Option<Gateway<Tokio>>>>,
 }
 
 impl UpnpManager {
@@ -98,7 +98,7 @@ impl UpnpManager {
         let external_ip = match gateway.get_external_ip().await {
             Ok(ip) => {
                 info!("[UPnP] External IP address: {}", ip);
-                Some(ip)
+                ip_to_ipv4(ip)
             }
             Err(e) => {
                 warn!("[UPnP] Failed to get external IP: {e}");
@@ -147,7 +147,7 @@ impl UpnpManager {
     /// Add a single port mapping
     async fn add_port_mapping(
         &self,
-        gateway: &Gateway,
+        gateway: &Gateway<Tokio>,
         port: u16,
         protocol: PortMappingProtocol,
     ) -> PortMappingResult {
@@ -165,7 +165,7 @@ impl UpnpManager {
             .add_port(
                 protocol,
                 port,
-                local_addr,
+                SocketAddr::V4(local_addr),
                 self.config.lease_duration_secs,
                 &description,
             )
@@ -205,7 +205,7 @@ impl UpnpManager {
     /// Forward a range of ports for WebRTC
     async fn forward_port_range(
         &self,
-        gateway: &Gateway,
+        gateway: &Gateway<Tokio>,
         range: &PortRange,
     ) -> Vec<PortMappingResult> {
         let mut results = Vec::new();
@@ -241,9 +241,12 @@ impl UpnpManager {
         if let Some(gw) = gateway.as_ref() {
             match gw.get_external_ip().await {
                 Ok(ip) => {
-                    let mut status = self.status.write().await;
-                    status.external_ip = Some(ip);
-                    Some(ip)
+                    let ipv4 = ip_to_ipv4(ip);
+                    if let Some(ip) = ipv4 {
+                        let mut status = self.status.write().await;
+                        status.external_ip = Some(ip);
+                    }
+                    ipv4
                 }
                 Err(e) => {
                     warn!("[UPnP] Failed to refresh external IP: {e}");
@@ -340,6 +343,14 @@ fn protocol_name(protocol: PortMappingProtocol) -> &'static str {
     }
 }
 
+/// Convert IpAddr to Ipv4Addr if possible
+fn ip_to_ipv4(ip: IpAddr) -> Option<Ipv4Addr> {
+    match ip {
+        IpAddr::V4(v4) => Some(v4),
+        IpAddr::V6(_) => None,
+    }
+}
+
 /// Helper to detect the local IP address to use for port forwarding
 pub fn detect_local_ip() -> Option<Ipv4Addr> {
     // Try to get the local IP by creating a UDP socket and checking its address
@@ -355,4 +366,3 @@ pub fn detect_local_ip() -> Option<Ipv4Addr> {
         std::net::SocketAddr::V6(_) => None,
     }
 }
-

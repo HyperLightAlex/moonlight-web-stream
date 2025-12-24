@@ -5,8 +5,7 @@
 //! connections are possible.
 
 use std::{
-    io,
-    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
+    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     time::Duration,
 };
 
@@ -14,7 +13,7 @@ use bytecodec::{DecodeExt, EncodeExt};
 use log::{debug, info, warn};
 use stun_codec::{
     rfc5389::{
-        attributes::{MappedAddress, Software, XorMappedAddress},
+        attributes::Software,
         methods::BINDING,
         Attribute,
     },
@@ -162,16 +161,23 @@ impl StunClient {
 
     /// Perform STUN binding request to a specific server
     fn binding_request(&self, server: &str) -> Result<StunResult, String> {
-        // Resolve server address
+        // Resolve server address (prefer IPv4)
         let server_addr: SocketAddr = server
             .parse()
             .or_else(|_| {
-                // Try to resolve hostname
+                // Try to resolve hostname, preferring IPv4
                 use std::net::ToSocketAddrs;
-                server
+                let addrs: Vec<_> = server
                     .to_socket_addrs()
                     .map_err(|e| format!("Failed to resolve {}: {}", server, e))?
-                    .next()
+                    .collect();
+                
+                // Prefer IPv4 addresses
+                addrs
+                    .iter()
+                    .find(|a| a.is_ipv4())
+                    .or(addrs.first())
+                    .copied()
                     .ok_or_else(|| format!("No addresses found for {}", server))
             })
             .map_err(|e| format!("Invalid server address {}: {}", server, e))?;
@@ -213,7 +219,7 @@ impl StunClient {
         let response = decoder
             .decode_from_bytes(&buf[..len])
             .map_err(|e| format!("Failed to decode STUN response: {}", e))?
-            .map_err(|e| format!("Incomplete STUN response: {}", e))?;
+            .map_err(|e| format!("Incomplete STUN response: {:?}", e))?;
 
         // Verify transaction ID
         if response.transaction_id() != transaction_id {

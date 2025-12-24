@@ -36,7 +36,7 @@ async-trait.workspace = true
 hex.workspace = true
 
 # UPnP / NAT Traversal
-igd-next = { workspace = true }
+igd-next = { workspace = true, features = ["aio_tokio"] }
 stun_codec = { workspace = true }
 bytecodec = { workspace = true }
 
