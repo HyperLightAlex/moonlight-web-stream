@@ -28,6 +28,8 @@ pub struct Config {
     pub log: LogConfig,
     #[serde(default)]
     pub upnp: UpnpConfig,
+    #[serde(default)]
+    pub turn: TurnConfig,
 }
 
 impl Default for Config {
@@ -40,6 +42,7 @@ impl Default for Config {
             webrtc: Default::default(),
             log: Default::default(),
             upnp: Default::default(),
+            turn: Default::default(),
         }
     }
 }
@@ -198,23 +201,43 @@ impl FromStr for PortRange {
 }
 
 fn default_ice_servers() -> Vec<RtcIceServer> {
-    vec![RtcIceServer {
-        is_default: true,
-        urls: vec![
-            // Google
-            "stun:stun.l.google.com:19302".to_string(),
-            "stun:stun.l.google.com:5349".to_string(),
-            "stun:stun1.l.google.com:3478".to_string(),
-            "stun:stun1.l.google.com:5349".to_string(),
-            "stun:stun2.l.google.com:19302".to_string(),
-            "stun:stun2.l.google.com:5349".to_string(),
-            "stun:stun3.l.google.com:3478".to_string(),
-            "stun:stun3.l.google.com:5349".to_string(),
-            "stun:stun4.l.google.com:19302".to_string(),
-            "stun:stun4.l.google.com:5349".to_string(),
-        ],
-        ..Default::default()
-    }]
+    vec![
+        // STUN servers for NAT traversal (direct connection)
+        RtcIceServer {
+            is_default: true,
+            urls: vec![
+                // Google STUN servers
+                "stun:stun.l.google.com:19302".to_string(),
+                "stun:stun.l.google.com:5349".to_string(),
+                "stun:stun1.l.google.com:3478".to_string(),
+                "stun:stun1.l.google.com:5349".to_string(),
+                "stun:stun2.l.google.com:19302".to_string(),
+                "stun:stun2.l.google.com:5349".to_string(),
+                "stun:stun3.l.google.com:3478".to_string(),
+                "stun:stun3.l.google.com:5349".to_string(),
+                "stun:stun4.l.google.com:19302".to_string(),
+                "stun:stun4.l.google.com:5349".to_string(),
+                // Cloudflare STUN (additional fallback)
+                "stun:stun.cloudflare.com:3478".to_string(),
+            ],
+            ..Default::default()
+        },
+        // NOTE: To enable TURN relay for Symmetric NAT / CGNAT users,
+        // add a TURN server configuration here or via environment variables:
+        //
+        // RtcIceServer {
+        //     is_default: false,
+        //     urls: vec![
+        //         "turn:your-turn-server.com:3478?transport=udp".to_string(),
+        //         "turn:your-turn-server.com:3478?transport=tcp".to_string(),
+        //         "turn:your-turn-server.com:443?transport=tcp".to_string(),
+        //     ],
+        //     username: "your-username".to_string(),
+        //     credential: "your-credential".to_string(),
+        // },
+        //
+        // Or use the docker-compose.with-turn.yaml for a self-hosted TURN server.
+    ]
 }
 fn default_network_types() -> Vec<WebRtcNetworkType> {
     vec![WebRtcNetworkType::Udp4, WebRtcNetworkType::Udp6]
@@ -372,4 +395,57 @@ fn default_upnp_lease_duration() -> u32 {
 
 fn default_upnp_description() -> String {
     "Moonlight Web Stream".to_string()
+}
+
+// -- TURN Server Config
+
+/// Configuration for TURN relay server.
+/// TURN servers are used as fallback when direct connections fail
+/// (e.g., Symmetric NAT, Carrier-Grade NAT).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnConfig {
+    /// Enable TURN server in ICE configuration
+    #[serde(default)]
+    pub enabled: bool,
+    /// TURN server URLs (e.g., "turn:turn.example.com:3478")
+    #[serde(default)]
+    pub urls: Vec<String>,
+    /// TURN authentication username
+    #[serde(default)]
+    pub username: String,
+    /// TURN authentication credential/password
+    #[serde(default)]
+    pub credential: String,
+}
+
+impl Default for TurnConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            urls: Vec::new(),
+            username: String::new(),
+            credential: String::new(),
+        }
+    }
+}
+
+impl TurnConfig {
+    /// Convert to RtcIceServer if enabled and configured
+    pub fn to_ice_server(&self) -> Option<RtcIceServer> {
+        if !self.enabled || self.urls.is_empty() {
+            return None;
+        }
+
+        Some(RtcIceServer {
+            is_default: false,
+            urls: self.urls.clone(),
+            username: self.username.clone(),
+            credential: self.credential.clone(),
+        })
+    }
+
+    /// Check if TURN is properly configured
+    pub fn is_configured(&self) -> bool {
+        self.enabled && !self.urls.is_empty() && !self.username.is_empty()
+    }
 }

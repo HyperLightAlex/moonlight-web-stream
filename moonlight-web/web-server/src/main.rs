@@ -26,6 +26,7 @@ mod web;
 
 mod cli;
 mod human_json;
+mod stun;
 mod upnp;
 
 #[actix_web::main]

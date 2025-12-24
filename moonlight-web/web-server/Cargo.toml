@@ -37,6 +37,8 @@ hex.workspace = true
 
 # UPnP / NAT Traversal
 igd-next = { workspace = true }
+stun_codec = { workspace = true }
+bytecodec = { workspace = true }
 
 [lints]
 workspace = true
