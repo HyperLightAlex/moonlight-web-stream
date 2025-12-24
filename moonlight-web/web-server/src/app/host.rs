@@ -424,6 +424,7 @@ impl Host {
                     current_game: info.current_game,
                     max_luma_pixels_hevc: info.max_luma_pixels_hevc,
                     server_codec_mode_support: info.server_codec_mode_support,
+                    remote_access: None, // Populated by API layer
                 })
             }
             Ok(None) => {
@@ -452,6 +453,7 @@ impl Host {
                     current_game: 0,
                     max_luma_pixels_hevc: 0,
                     server_codec_mode_support: 0,
+                    remote_access: None, // Populated by API layer
                 })
             }
             Err(err) => Err(err),

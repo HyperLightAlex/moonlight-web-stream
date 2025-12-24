@@ -16,6 +16,7 @@ use crate::{
     app::App,
     cli::{Cli, Command},
     human_json::preprocess_human_json,
+    remote_access::RemoteAccessProvider,
     upnp::{UpnpManager, detect_local_ip},
     web::{web_config_js_service, web_service},
 };
@@ -26,6 +27,7 @@ mod web;
 
 mod cli;
 mod human_json;
+mod remote_access;
 mod stun;
 mod upnp;
 
@@ -122,7 +124,7 @@ async fn start(config: Config) -> Result<(), anyhow::Error> {
     let bind_address = app.config().web_server.bind_address;
 
     // Initialize UPnP if enabled
-    let upnp_manager = if config.upnp.enabled {
+    let (upnp_manager, upnp_status) = if config.upnp.enabled {
         let local_ip = detect_local_ip().unwrap_or_else(|| {
             info!("[UPnP] Could not detect local IP, using bind address");
             match bind_address {
@@ -134,7 +136,7 @@ async fn start(config: Config) -> Result<(), anyhow::Error> {
         let server_port = bind_address.port();
         let manager = UpnpManager::new(config.upnp.clone(), server_port, local_ip);
 
-        match manager.initialize().await {
+        let status = match manager.initialize().await {
             Ok(status) => {
                 if status.available {
                     if let Some(external_ip) = status.external_ip {
@@ -144,26 +146,36 @@ async fn start(config: Config) -> Result<(), anyhow::Error> {
                         );
                     }
                 }
+                Some(status)
             }
             Err(e) => {
                 info!("[UPnP] UPnP setup failed: {}. Remote streaming may require manual port forwarding.", e);
+                None
             }
-        }
+        };
 
-        Some(Data::new(manager))
+        (Some(Data::new(manager)), status)
     } else {
-        None
+        (None, None)
     };
+
+    // Initialize remote access provider (discovers external IP, NAT type, etc.)
+    let remote_access_provider = Data::new(RemoteAccessProvider::new(
+        &config,
+        upnp_status.as_ref(),
+    ));
 
     let server = HttpServer::new({
         let url_path_prefix = config.web_server.url_path_prefix.clone();
         let app = app.clone();
         let upnp_manager = upnp_manager.clone();
+        let remote_access_provider = remote_access_provider.clone();
 
         move || {
             let mut actix_app = ActixApp::new().service(
                 scope(&url_path_prefix)
                     .app_data(app.clone())
+                    .app_data(remote_access_provider.clone())
                     .wrap(
                         Logger::new("%r took %D ms")
                             .log_target("http_server")

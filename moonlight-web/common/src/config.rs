@@ -30,6 +30,8 @@ pub struct Config {
     pub upnp: UpnpConfig,
     #[serde(default)]
     pub turn: TurnConfig,
+    #[serde(default)]
+    pub remote: RemoteConfig,
 }
 
 impl Default for Config {
@@ -43,6 +45,7 @@ impl Default for Config {
             log: Default::default(),
             upnp: Default::default(),
             turn: Default::default(),
+            remote: Default::default(),
         }
     }
 }
@@ -448,4 +451,51 @@ impl TurnConfig {
     pub fn is_configured(&self) -> bool {
         self.enabled && !self.urls.is_empty() && !self.username.is_empty()
     }
+}
+
+// -- Remote Access Config
+
+/// Configuration for remote (internet) streaming access.
+/// These settings control how the server advertises its remote connectivity
+/// to clients during pairing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteConfig {
+    /// Enable remote access info in pairing responses
+    #[serde(default = "default_remote_enabled")]
+    pub enabled: bool,
+    /// User-configured hostname for remote access (e.g., "mygaming.duckdns.org").
+    /// If not set, external IP from UPnP/STUN will be used.
+    #[serde(default)]
+    pub hostname: Option<String>,
+    /// Port for remote access. If not set, uses the web server's bind port.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Whether to require SSL for remote connections.
+    /// If true and SSL is not configured, remote access will be disabled.
+    #[serde(default)]
+    pub ssl_required: bool,
+    /// Whether to auto-discover external IP via STUN if UPnP fails.
+    /// Default: true
+    #[serde(default = "default_stun_discovery")]
+    pub stun_discovery: bool,
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_remote_enabled(),
+            hostname: None,
+            port: None,
+            ssl_required: false,
+            stun_discovery: default_stun_discovery(),
+        }
+    }
+}
+
+fn default_remote_enabled() -> bool {
+    true // Enable by default - no harm in providing the info
+}
+
+fn default_stun_discovery() -> bool {
+    true // Use STUN to discover external IP if UPnP fails
 }

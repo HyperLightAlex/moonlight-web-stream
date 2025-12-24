@@ -78,6 +78,29 @@ pub struct UndetailedHost {
     pub server_state: Option<HostState>,
 }
 
+/// Information for remote (internet) access to the server.
+/// Populated during pairing to enable remote streaming without additional configuration.
+#[derive(Serialize, Deserialize, Debug, TS, Clone)]
+#[ts(export, export_to = EXPORT_PATH)]
+pub struct RemoteAccessInfo {
+    /// External IP address discovered via UPnP or STUN
+    pub external_ip: Option<String>,
+    /// User-configured hostname (e.g., "mygaming.duckdns.org")
+    pub hostname: Option<String>,
+    /// Port for remote access (may differ from local port)
+    pub port: u16,
+    /// Whether SSL/TLS is available for remote connections
+    pub ssl_available: bool,
+    /// How the external IP was discovered: "upnp", "stun", "configured", or "none"
+    pub discovery_method: String,
+    /// Detected NAT type: "none", "full_cone", "port_restricted", "symmetric", "cgnat", etc.
+    pub nat_type: String,
+    /// Whether TURN relay is recommended based on NAT type
+    pub turn_recommended: bool,
+    /// ICE servers including TURN if configured (for WebRTC)
+    pub ice_servers: Option<Vec<RtcIceServer>>,
+}
+
 #[derive(Serialize, Deserialize, Debug, TS)]
 #[ts(export, export_to = EXPORT_PATH)]
 pub struct DetailedHost {
@@ -99,6 +122,9 @@ pub struct DetailedHost {
     pub current_game: u32,
     pub max_luma_pixels_hevc: u32,
     pub server_codec_mode_support: u32,
+    /// Remote access configuration for internet streaming.
+    /// Present if server has discovered its external address.
+    pub remote_access: Option<RemoteAccessInfo>,
 }
 
 #[derive(Serialize, Deserialize, Debug, TS)]
