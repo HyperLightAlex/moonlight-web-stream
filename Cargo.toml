@@ -87,6 +87,9 @@ num = "0.4"
 num-derive = "0.4"
 num-traits = "0.2"
 
+# UPnP / NAT Traversal
+igd-next = "0.15.1"
+
 # Sys
 bindgen = { version = "0.72.0" }
 cmake = { version = "0.1.54" }

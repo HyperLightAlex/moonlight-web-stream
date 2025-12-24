@@ -26,6 +26,8 @@ pub struct Config {
     pub streamer_path: String,
     #[serde(default)]
     pub log: LogConfig,
+    #[serde(default)]
+    pub upnp: UpnpConfig,
 }
 
 impl Default for Config {
@@ -37,6 +39,7 @@ impl Default for Config {
             moonlight: Default::default(),
             webrtc: Default::default(),
             log: Default::default(),
+            upnp: Default::default(),
         }
     }
 }
@@ -323,4 +326,50 @@ fn default_pair_device_name() -> String {
 
 fn default_streamer_path() -> String {
     "./streamer".to_string()
+}
+
+// -- UPnP Config
+
+/// Configuration for automatic UPnP port forwarding.
+/// When enabled, the server will attempt to automatically configure
+/// port forwarding on compatible routers for remote streaming access.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpnpConfig {
+    /// Enable automatic UPnP port forwarding
+    #[serde(default)]
+    pub enabled: bool,
+    /// Lease duration in seconds (0 = permanent, recommended: 3600-86400)
+    #[serde(default = "default_upnp_lease_duration")]
+    pub lease_duration_secs: u32,
+    /// Description shown in router's port forwarding table
+    #[serde(default = "default_upnp_description")]
+    pub description: String,
+    /// Additional ports to forward for WebRTC (UDP)
+    /// If not specified, uses the webrtc.port_range if set
+    #[serde(default)]
+    pub webrtc_ports: Option<PortRange>,
+    /// Whether to also forward TCP ports for TURN fallback
+    #[serde(default)]
+    pub forward_tcp: bool,
+}
+
+impl Default for UpnpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lease_duration_secs: default_upnp_lease_duration(),
+            description: default_upnp_description(),
+            webrtc_ports: None,
+            forward_tcp: false,
+        }
+    }
+}
+
+fn default_upnp_lease_duration() -> u32 {
+    // 1 hour - reasonable balance between security and convenience
+    3600
+}
+
+fn default_upnp_description() -> String {
+    "Moonlight Web Stream".to_string()
 }

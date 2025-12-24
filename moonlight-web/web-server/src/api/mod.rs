@@ -33,6 +33,7 @@ use common::api_bindings::{
 
 pub mod admin;
 pub mod auth;
+pub mod network;
 pub mod stream;
 
 pub mod response_streaming;
@@ -365,5 +366,9 @@ pub fn api_service() -> impl HttpServiceFactory {
             patch_user,
             delete_user,
             list_users
+        ])
+        .service(services![
+            // -- Network
+            network::get_network_status,
         ])
 }

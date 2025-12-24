@@ -16,6 +16,7 @@ use crate::{
     app::App,
     cli::{Cli, Command},
     human_json::preprocess_human_json,
+    upnp::{UpnpManager, detect_local_ip},
     web::{web_config_js_service, web_service},
 };
 
@@ -25,6 +26,7 @@ mod web;
 
 mod cli;
 mod human_json;
+mod upnp;
 
 #[actix_web::main]
 async fn main() {
@@ -117,12 +119,48 @@ async fn start(config: Config) -> Result<(), anyhow::Error> {
     let app = Data::new(app);
 
     let bind_address = app.config().web_server.bind_address;
+
+    // Initialize UPnP if enabled
+    let upnp_manager = if config.upnp.enabled {
+        let local_ip = detect_local_ip().unwrap_or_else(|| {
+            info!("[UPnP] Could not detect local IP, using bind address");
+            match bind_address {
+                std::net::SocketAddr::V4(addr) => *addr.ip(),
+                std::net::SocketAddr::V6(_) => std::net::Ipv4Addr::UNSPECIFIED,
+            }
+        });
+
+        let server_port = bind_address.port();
+        let manager = UpnpManager::new(config.upnp.clone(), server_port, local_ip);
+
+        match manager.initialize().await {
+            Ok(status) => {
+                if status.available {
+                    if let Some(external_ip) = status.external_ip {
+                        info!(
+                            "[Server] Remote access available at: {}:{}",
+                            external_ip, server_port
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                info!("[UPnP] UPnP setup failed: {}. Remote streaming may require manual port forwarding.", e);
+            }
+        }
+
+        Some(Data::new(manager))
+    } else {
+        None
+    };
+
     let server = HttpServer::new({
         let url_path_prefix = config.web_server.url_path_prefix.clone();
         let app = app.clone();
+        let upnp_manager = upnp_manager.clone();
 
         move || {
-            ActixApp::new().service(
+            let mut actix_app = ActixApp::new().service(
                 scope(&url_path_prefix)
                     .app_data(app.clone())
                     .wrap(
@@ -143,7 +181,14 @@ async fn start(config: Config) -> Result<(), anyhow::Error> {
                     .service(api_service())
                     .service(web_config_js_service())
                     .service(web_service()),
-            )
+            );
+
+            // Add UPnP manager if available
+            if let Some(ref upnp) = upnp_manager {
+                actix_app = actix_app.app_data(upnp.clone());
+            }
+
+            actix_app
         }
     });
 
