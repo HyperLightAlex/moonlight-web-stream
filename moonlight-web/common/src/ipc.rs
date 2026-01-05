@@ -40,14 +40,29 @@ pub enum ServerIpcMessage {
         client_certificate: Pem,
         server_certificate: Pem,
         app_id: u32,
+        /// Session token for hybrid mode input connection.
+        /// Only set when hybrid_mode is enabled in stream_settings.
+        #[serde(default)]
+        session_token: Option<String>,
     },
     WebSocket(StreamClientMessage),
+    /// Input connection has joined (hybrid mode)
+    InputJoined,
+    /// WebRTC signaling message from the input connection
+    InputWebSocket(crate::api_bindings::StreamSignalingMessage),
+    /// Input connection has disconnected
+    InputDisconnected,
     Stop,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum StreamerIpcMessage {
+    /// WebSocket message for primary stream client
     WebSocket(StreamServerMessage),
+    /// WebRTC signaling message for input client (hybrid mode)
+    InputSignaling(crate::api_bindings::StreamSignalingMessage),
+    /// Input peer connection is ready to receive data
+    InputReady,
     Stop,
 }
 

@@ -81,11 +81,18 @@ struct WebRtcInner {
     audio: Mutex<WebRtcAudio>,
     // Timeout / Terminate
     pub timeout_terminate_request: Mutex<Option<Instant>>,
+    // Input-only peer connection for hybrid mode
+    input_peer: Mutex<Option<Arc<RTCPeerConnection>>>,
+    // Stats channel on input peer (preferred in hybrid mode)
+    input_stats_channel: Mutex<Option<Arc<RTCDataChannel>>>,
+    // Store config for creating input peer
+    rtc_config: RTCConfiguration,
 }
 
 pub async fn new(
     stream_settings: StreamSettings,
     config: &WebRtcConfig,
+    session_token: Option<String>,
 ) -> Result<(WebRTCTransportSender, WebRTCTransportEvents), anyhow::Error> {
     // -- Configure WebRTC
     let rtc_config = RTCConfiguration {
@@ -153,6 +160,7 @@ pub async fn new(
         .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
             StreamServerMessage::Setup {
                 ice_servers: config.ice_servers.clone(),
+                session_token,
             },
         )))
         .await
@@ -162,6 +170,9 @@ pub async fn new(
         );
     };
 
+    // Clone config for potential input peer creation later
+    let rtc_config_clone = rtc_config.clone();
+    
     let peer = Arc::new(api.new_peer_connection(rtc_config).await?);
 
     let general_channel = peer.create_data_channel("general", None).await?;
@@ -185,6 +196,9 @@ pub async fn new(
             stream_settings.audio_sample_queue_size as usize,
         )),
         timeout_terminate_request: Mutex::new(None),
+        input_peer: Mutex::new(None),
+        input_stats_channel: Mutex::new(None),
+        rtc_config: rtc_config_clone,
     });
 
     let this = Arc::downgrade(&this_owned);
@@ -558,6 +572,286 @@ impl WebRtcInner {
         *stats = None;
     }
 
+    // -- Input Peer (Hybrid Mode)
+    async fn create_input_peer(self: &Arc<Self>) {
+        info!("[InputPeer]: Creating input-only peer connection");
+
+        // Create a new peer connection for input only (no media)
+        let api = APIBuilder::new().build();
+
+        let input_peer = match api.new_peer_connection(self.rtc_config.clone()).await {
+            Ok(peer) => Arc::new(peer),
+            Err(err) => {
+                error!("[InputPeer]: Failed to create input peer connection: {err:?}");
+                return;
+            }
+        };
+
+        let inner = Arc::downgrade(self);
+
+        // -- ICE candidate handler for input peer
+        input_peer.on_ice_candidate({
+            let inner = inner.clone();
+            Box::new(move |candidate: Option<RTCIceCandidate>| {
+                let inner = inner.clone();
+                Box::pin(async move {
+                    let Some(inner) = inner.upgrade() else {
+                        return;
+                    };
+                    inner.on_input_ice_candidate(candidate).await;
+                })
+            })
+        });
+
+        // -- Data channel handler for input peer
+        input_peer.on_data_channel({
+            let inner = inner.clone();
+            Box::new(move |channel: Arc<RTCDataChannel>| {
+                let inner = inner.clone();
+                Box::pin(async move {
+                    let Some(inner) = inner.upgrade() else {
+                        return;
+                    };
+                    inner.on_input_data_channel(channel).await;
+                })
+            })
+        });
+
+        // -- Connection state handler
+        input_peer.on_peer_connection_state_change({
+            let inner = inner.clone();
+            Box::new(move |state: RTCPeerConnectionState| {
+                let inner = inner.clone();
+                Box::pin(async move {
+                    let Some(inner) = inner.upgrade() else {
+                        return;
+                    };
+                    inner.on_input_peer_state_change(state).await;
+                })
+            })
+        });
+
+        // Store the input peer
+        {
+            let mut input_peer_guard = self.input_peer.lock().await;
+            *input_peer_guard = Some(input_peer.clone());
+        }
+
+        // Create an offer for the input peer (server-initiated)
+        match input_peer.create_offer(None).await {
+            Ok(offer) => {
+                if let Err(err) = input_peer.set_local_description(offer.clone()).await {
+                    error!("[InputPeer]: Failed to set local description: {err:?}");
+                    return;
+                }
+
+                debug!("[InputPeer]: Sending offer to input client");
+                if let Err(err) = self
+                    .event_sender
+                    .send(TransportEvent::SendIpc(StreamerIpcMessage::InputSignaling(
+                        StreamSignalingMessage::Description(RtcSessionDescription {
+                            ty: from_webrtc_sdp(offer.sdp_type),
+                            sdp: offer.sdp,
+                        }),
+                    )))
+                    .await
+                {
+                    error!("[InputPeer]: Failed to send offer: {err:?}");
+                }
+            }
+            Err(err) => {
+                error!("[InputPeer]: Failed to create offer: {err:?}");
+            }
+        }
+    }
+
+    async fn on_input_signaling(&self, signaling: StreamSignalingMessage) {
+        let input_peer_guard = self.input_peer.lock().await;
+        let Some(ref input_peer) = *input_peer_guard else {
+            warn!("[InputPeer]: Received signaling but input peer not created");
+            return;
+        };
+
+        match signaling {
+            StreamSignalingMessage::Description(description) => {
+                debug!("[InputPeer]: Received remote description");
+
+                let description = match &description.ty {
+                    RtcSdpType::Offer => RTCSessionDescription::offer(description.sdp),
+                    RtcSdpType::Answer => RTCSessionDescription::answer(description.sdp),
+                    RtcSdpType::Pranswer => RTCSessionDescription::pranswer(description.sdp),
+                    _ => {
+                        warn!("[InputPeer]: Unsupported SDP type: {:?}", description.ty);
+                        return;
+                    }
+                };
+
+                let Ok(description) = description else {
+                    warn!("[InputPeer]: Invalid RTCSessionDescription");
+                    return;
+                };
+
+                if let Err(err) = input_peer.set_remote_description(description).await {
+                    warn!("[InputPeer]: Failed to set remote description: {err:?}");
+                }
+            }
+            StreamSignalingMessage::AddIceCandidate(candidate) => {
+                debug!("[InputPeer]: Adding ICE candidate");
+
+                if let Err(err) = input_peer
+                    .add_ice_candidate(RTCIceCandidateInit {
+                        candidate: candidate.candidate,
+                        sdp_mid: candidate.sdp_mid,
+                        sdp_mline_index: candidate.sdp_mline_index,
+                        username_fragment: candidate.username_fragment,
+                    })
+                    .await
+                {
+                    warn!("[InputPeer]: Failed to add ICE candidate: {err:?}");
+                }
+            }
+        }
+    }
+
+    async fn on_input_ice_candidate(&self, candidate: Option<RTCIceCandidate>) {
+        let Some(candidate) = candidate else {
+            return;
+        };
+
+        let Ok(candidate_json) = candidate.to_json() else {
+            return;
+        };
+
+        debug!("[InputPeer]: Sending ICE candidate to input client");
+
+        if let Err(err) = self
+            .event_sender
+            .send(TransportEvent::SendIpc(StreamerIpcMessage::InputSignaling(
+                StreamSignalingMessage::AddIceCandidate(RtcIceCandidate {
+                    candidate: candidate_json.candidate,
+                    sdp_mid: candidate_json.sdp_mid,
+                    sdp_mline_index: candidate_json.sdp_mline_index,
+                    username_fragment: candidate_json.username_fragment,
+                }),
+            )))
+            .await
+        {
+            error!("[InputPeer]: Failed to send ICE candidate: {err:?}");
+        }
+    }
+
+    async fn on_input_data_channel(self: Arc<Self>, channel: Arc<RTCDataChannel>) {
+        let label = channel.label();
+        info!("[InputPeer]: Data channel opened: \"{label}\"");
+
+        let inner = Arc::downgrade(&self);
+
+        // Set up message handler - same as primary peer, routes to same event_sender
+        match label {
+            "stats" => {
+                // In hybrid mode, stats go to the input client
+                info!("[InputPeer]: Stats channel opened on input peer");
+                let mut input_stats = self.input_stats_channel.lock().await;
+
+                channel.on_close({
+                    let this = Arc::downgrade(&self);
+
+                    Box::new(move || {
+                        let this = this.clone();
+
+                        Box::pin(async move {
+                            let Some(this) = this.upgrade() else {
+                                warn!("[InputPeer]: Failed to close input stats channel");
+                                return;
+                            };
+
+                            let mut input_stats = this.input_stats_channel.lock().await;
+                            *input_stats = None;
+                            info!("[InputPeer]: Input stats channel closed");
+                        })
+                    })
+                });
+
+                *input_stats = Some(channel);
+            }
+            "mouse_reliable" | "mouse_absolute" | "mouse_relative" => {
+                channel.on_message(create_channel_message_handler(
+                    inner,
+                    TransportChannel(TransportChannelId::MOUSE_ABSOLUTE),
+                ));
+            }
+            "touch" => {
+                channel.on_message(create_channel_message_handler(
+                    inner,
+                    TransportChannel(TransportChannelId::TOUCH),
+                ));
+            }
+            "keyboard" => {
+                channel.on_message(create_channel_message_handler(
+                    inner,
+                    TransportChannel(TransportChannelId::KEYBOARD),
+                ));
+            }
+            "controllers" => {
+                channel.on_message(create_channel_message_handler(
+                    inner,
+                    TransportChannel(TransportChannelId::CONTROLLERS),
+                ));
+            }
+            _ if let Some(number) = label.strip_prefix("controller")
+                && let Ok(id) = number.parse::<usize>()
+                && id < InboundPacket::CONTROLLER_CHANNELS.len() =>
+            {
+                channel.on_message(create_channel_message_handler(
+                    inner,
+                    TransportChannel(InboundPacket::CONTROLLER_CHANNELS[id]),
+                ));
+            }
+            _ => {
+                debug!("[InputPeer]: Unknown data channel: {label}");
+            }
+        };
+    }
+
+    async fn on_input_peer_state_change(&self, state: RTCPeerConnectionState) {
+        info!("[InputPeer]: Connection state changed: {:?}", state);
+
+        if matches!(state, RTCPeerConnectionState::Connected) {
+            // Notify that input peer is ready
+            if let Err(err) = self
+                .event_sender
+                .send(TransportEvent::SendIpc(StreamerIpcMessage::InputReady))
+                .await
+            {
+                warn!("[InputPeer]: Failed to send InputReady: {err:?}");
+            }
+        } else if matches!(
+            state,
+            RTCPeerConnectionState::Failed | RTCPeerConnectionState::Disconnected | RTCPeerConnectionState::Closed
+        ) {
+            info!("[InputPeer]: Input peer disconnected");
+            // Clean up input peer
+            let mut input_peer_guard = self.input_peer.lock().await;
+            *input_peer_guard = None;
+        }
+    }
+
+    async fn close_input_peer(&self) {
+        // Clean up input stats channel
+        {
+            let mut input_stats = self.input_stats_channel.lock().await;
+            *input_stats = None;
+        }
+        
+        // Close and clean up input peer
+        let mut input_peer_guard = self.input_peer.lock().await;
+        if let Some(ref input_peer) = *input_peer_guard {
+            let _ = input_peer.close().await;
+        }
+        *input_peer_guard = None;
+        info!("[InputPeer]: Input peer closed");
+    }
+
     // -- Termination
     async fn request_terminate(self: &Arc<Self>) {
         let this = self.clone();
@@ -661,9 +955,11 @@ impl TransportSender for WebRTCTransportSender {
                 _ => {}
             },
             TransportChannelId::STATS => {
-                let stats = self.inner.stats_channel.lock().await;
-                if let Some(stats) = stats.as_ref() {
-                    match stats.send(&bytes).await {
+                // In hybrid mode, prefer the input stats channel (native client)
+                // Fall back to primary stats channel if input not available
+                let input_stats = self.inner.input_stats_channel.lock().await;
+                if let Some(input_stats) = input_stats.as_ref() {
+                    match input_stats.send(&bytes).await {
                         Ok(_) => {}
                         Err(webrtc::Error::ErrDataChannelNotOpen) => {
                             return Err(TransportError::ChannelClosed);
@@ -671,7 +967,20 @@ impl TransportSender for WebRTCTransportSender {
                         _ => {}
                     }
                 } else {
-                    return Err(TransportError::ChannelClosed);
+                    // Fall back to primary stats channel
+                    drop(input_stats);
+                    let stats = self.inner.stats_channel.lock().await;
+                    if let Some(stats) = stats.as_ref() {
+                        match stats.send(&bytes).await {
+                            Ok(_) => {}
+                            Err(webrtc::Error::ErrDataChannelNotOpen) => {
+                                return Err(TransportError::ChannelClosed);
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        return Err(TransportError::ChannelClosed);
+                    }
                 }
             }
             _ => {
@@ -683,8 +992,25 @@ impl TransportSender for WebRTCTransportSender {
     }
 
     async fn on_ipc_message(&self, message: ServerIpcMessage) -> Result<(), TransportError> {
-        if let ServerIpcMessage::WebSocket(message) = message {
-            self.inner.on_ws_message(message).await;
+        match message {
+            ServerIpcMessage::WebSocket(message) => {
+                self.inner.on_ws_message(message).await;
+            }
+            ServerIpcMessage::InputJoined => {
+                info!("[WebRTC]: Input connection joined - creating input peer");
+                self.inner.clone().create_input_peer().await;
+            }
+            ServerIpcMessage::InputWebSocket(signaling) => {
+                debug!("[WebRTC]: Received input signaling message");
+                self.inner.on_input_signaling(signaling).await;
+            }
+            ServerIpcMessage::InputDisconnected => {
+                info!("[WebRTC]: Input connection disconnected");
+                self.inner.close_input_peer().await;
+            }
+            ServerIpcMessage::Init { .. } | ServerIpcMessage::Stop => {
+                // These are handled elsewhere
+            }
         }
         Ok(())
     }

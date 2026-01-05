@@ -21,6 +21,7 @@ use crate::app::{
     auth::{SessionToken, UserAuth},
     host::{AppId, HostId},
     password::StoragePassword,
+    session::SessionManager,
     storage::{Either, Storage, StorageHostModify, StorageUserAdd, create_storage},
     user::{Admin, AuthenticatedUser, Role, User, UserId},
 };
@@ -29,6 +30,7 @@ pub mod auth;
 pub mod fuji;
 pub mod host;
 pub mod password;
+pub mod session;
 pub mod storage;
 pub mod user;
 
@@ -140,6 +142,8 @@ struct AppInner {
     config: Config,
     storage: Arc<dyn Storage + Send + Sync>,
     app_image_cache: RwLock<HashMap<(UserId, HostId, AppId), Bytes>>,
+    /// Session manager for hybrid streaming mode
+    session_manager: SessionManager,
 }
 
 pub type MoonlightClient = ReqwestClient;
@@ -154,11 +158,17 @@ impl App {
             storage: create_storage(config.data_storage.clone()).await?,
             config,
             app_image_cache: Default::default(),
+            session_manager: SessionManager::new(),
         };
 
         Ok(Self {
             inner: Arc::new(app),
         })
+    }
+
+    /// Get the session manager for hybrid streaming mode
+    pub fn session_manager(&self) -> &SessionManager {
+        &self.inner.session_manager
     }
 
     fn new_ref(&self) -> AppRef {

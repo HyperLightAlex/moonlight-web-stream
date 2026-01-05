@@ -20,6 +20,10 @@ pub struct StreamSettings {
     pub video_supported_formats: SupportedVideoFormats,
     pub video_colorspace: Colorspace,
     pub video_color_range_full: bool,
+    /// When true, the client uses a separate WebRTC connection for input.
+    /// The server should NOT create input data channels on the primary connection.
+    #[serde(default)]
+    pub hybrid_mode: bool,
 }
 
 pub fn serialize_json<T>(message: &T) -> Option<String>

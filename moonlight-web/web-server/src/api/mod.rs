@@ -34,6 +34,7 @@ use common::api_bindings::{
 
 pub mod admin;
 pub mod auth;
+pub mod input;
 pub mod network;
 pub mod stream;
 
@@ -383,6 +384,8 @@ pub fn api_service() -> impl HttpServiceFactory {
             // -- Stream
             stream::start_host,
             stream::cancel_host,
+            // -- Input (hybrid mode)
+            input::input_connect,
         ])
         .service(services![
             // -- Admin

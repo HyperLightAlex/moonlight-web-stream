@@ -412,6 +412,11 @@ pub enum StreamClientMessage {
         video_supported_formats: u32,
         video_colorspace: StreamColorspace,
         video_color_range_full: bool,
+        /// When true, the client will use a separate WebRTC connection for input.
+        /// The server should NOT create input data channels on the primary connection,
+        /// and should return a session_token for the input connection to use.
+        #[serde(default)]
+        hybrid_mode: bool,
     },
     WebRtc(StreamSignalingMessage),
 }
@@ -451,6 +456,11 @@ pub struct StreamCapabilities {
 pub enum StreamServerMessage {
     Setup {
         ice_servers: Vec<RtcIceServer>,
+        /// Session token for hybrid mode input connection.
+        /// Only present when the client requested hybrid_mode: true in Init.
+        /// The native input client uses this token to join the same session.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_token: Option<String>,
     },
     WebRtc(StreamSignalingMessage),
     // Optional Info
@@ -483,6 +493,59 @@ pub enum StreamServerMessage {
     ConnectionTerminated {
         error_code: i32,
     },
+    /// Notification that the input connection has disconnected (hybrid mode)
+    InputDisconnected,
+    /// Notification that the input connection has joined (hybrid mode)
+    InputJoined,
+    /// New reconnection token available after input disconnection (hybrid mode)
+    /// The primary client should pass this to the native input client for reconnection
+    ReconnectionTokenAvailable {
+        session_token: String,
+    },
+}
+
+// -- Input-Only Connection Messages (Hybrid Mode)
+
+/// Error codes for input connection failures
+#[derive(Serialize, Deserialize, Debug, TS, Clone)]
+#[ts(export, export_to = EXPORT_PATH)]
+pub enum InputErrorCode {
+    TokenExpired,
+    TokenInvalid,
+    SessionNotFound,
+    InputAlreadyConnected,
+    InternalError,
+}
+
+/// Messages sent from the input client to the server
+#[derive(Serialize, Deserialize, Debug, TS)]
+#[ts(export, export_to = EXPORT_PATH)]
+pub enum InputClientMessage {
+    /// Initial message to join an existing session
+    Join {
+        session_token: String,
+    },
+    /// WebRTC signaling messages (answer, ICE candidates)
+    WebRtc(StreamSignalingMessage),
+}
+
+/// Messages sent from the server to the input client
+#[derive(Serialize, Deserialize, Debug, TS)]
+#[ts(export, export_to = EXPORT_PATH)]
+pub enum InputServerMessage {
+    /// Sent when the input connection is accepted
+    Accepted {
+        ice_servers: Vec<RtcIceServer>,
+    },
+    /// WebRTC signaling messages (offer, ICE candidates)
+    WebRtc(StreamSignalingMessage),
+    /// Error response
+    Error {
+        code: InputErrorCode,
+        message: String,
+    },
+    /// Notification that the primary stream has disconnected
+    PrimaryDisconnected,
 }
 
 #[derive(Serialize, Deserialize, Debug, TS)]

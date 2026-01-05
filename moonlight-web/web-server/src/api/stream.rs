@@ -20,6 +20,7 @@ use tokio::{process::Command, spawn};
 use crate::app::{
     App, AppError,
     host::{AppId, HostId},
+    session::{InputToStreamerMessage, SessionEvent},
     user::AuthenticatedUser,
 };
 
@@ -76,6 +77,7 @@ pub async fn start_host(
             video_supported_formats,
             video_colorspace,
             video_color_range_full,
+            hybrid_mode,
         } = message
         else {
             let _ = session.close(None).await;
@@ -86,6 +88,22 @@ pub async fn start_host(
 
         let host_id = HostId(host_id);
         let app_id = AppId(app_id);
+
+        // Generate session token for hybrid mode and register with session manager
+        let (session_token, hybrid_session_id, input_msg_rx) = if hybrid_mode {
+            let token = uuid::Uuid::new_v4().to_string();
+            let (session_id, _, input_rx) = web_app
+                .session_manager()
+                .register_session(token.clone())
+                .await;
+            info!(
+                "[Stream]: Hybrid mode enabled, session_id: {}, token: {}",
+                session_id, token
+            );
+            (Some(token), Some(session_id), Some(input_rx))
+        } else {
+            (None, None, None)
+        };
 
         let stream_settings = StreamSettings {
             bitrate,
@@ -103,6 +121,7 @@ pub async fn start_host(
                 }),
             video_colorspace: video_colorspace.into(),
             video_color_range_full,
+            hybrid_mode,
         };
 
         // -- Collect host data
@@ -229,24 +248,161 @@ pub async fn start_host(
         )
         .await;
 
-        // Redirect ipc message into ws
-        spawn(async move {
-            while let Some(message) = ipc_receiver.recv().await {
-                match message {
-                    StreamerIpcMessage::WebSocket(message) => {
-                        if let Err(Closed) = send_ws_message(&mut session, message).await {
-                            warn!(
-                                "[Ipc]: Tried to send a ws message but the socket is already closed"
-                            );
+        // Clone web_app for use in spawned task (for session cleanup)
+        let web_app_cleanup = web_app.clone();
+        let hybrid_session_id_cleanup = hybrid_session_id.clone();
+
+        // Clone IPC sender for input message forwarding
+        let mut ipc_sender_for_input = ipc_sender.clone();
+
+        // Spawn task to forward input messages to streamer (if hybrid mode)
+        if let Some(mut input_rx) = input_msg_rx {
+            let hybrid_session_id_input = hybrid_session_id.clone();
+            spawn(async move {
+                while let Some(msg) = input_rx.recv().await {
+                    match msg {
+                        InputToStreamerMessage::Joined => {
+                            debug!("[Stream]: Input connection joined, notifying streamer");
+                            ipc_sender_for_input.send(ServerIpcMessage::InputJoined).await;
+                        }
+                        InputToStreamerMessage::Signaling(signaling) => {
+                            debug!("[Stream]: Forwarding input signaling to streamer");
+                            ipc_sender_for_input
+                                .send(ServerIpcMessage::InputWebSocket(signaling))
+                                .await;
+                        }
+                        InputToStreamerMessage::Disconnected => {
+                            debug!("[Stream]: Input connection disconnected, notifying streamer");
+                            ipc_sender_for_input
+                                .send(ServerIpcMessage::InputDisconnected)
+                                .await;
                         }
                     }
-                    StreamerIpcMessage::Stop => {
-                        debug!("[Ipc]: ipc receiver stopped by streamer");
-                        break;
+                }
+                debug!(
+                    "[Stream]: Input message receiver closed for session {:?}",
+                    hybrid_session_id_input
+                );
+            });
+        }
+
+        // Clone for forwarding input signaling from streamer
+        let web_app_for_input = web_app.clone();
+        let hybrid_session_id_for_input = hybrid_session_id.clone();
+
+        // Set up session event receiver for hybrid mode
+        let (session_event_tx, mut session_event_rx) = tokio::sync::mpsc::channel::<SessionEvent>(32);
+        if let Some(ref session_id) = hybrid_session_id_for_input {
+            web_app_for_input
+                .session_manager()
+                .set_primary_notify(session_id, session_event_tx)
+                .await;
+        }
+
+        // Redirect ipc message into ws, also handle session events
+        spawn(async move {
+            loop {
+                tokio::select! {
+                    ipc_msg = ipc_receiver.recv() => {
+                        match ipc_msg {
+                            Some(StreamerIpcMessage::WebSocket(message)) => {
+                                if let Err(Closed) = send_ws_message(&mut session, message).await {
+                                    warn!(
+                                        "[Ipc]: Tried to send a ws message but the socket is already closed"
+                                    );
+                                    break;
+                                }
+                            }
+                            Some(StreamerIpcMessage::InputSignaling(signaling)) => {
+                                // Forward input signaling to input client via session manager
+                                if let Some(ref session_id) = hybrid_session_id_for_input {
+                                    debug!("[Ipc]: Forwarding input signaling from streamer to input client");
+                                    web_app_for_input
+                                        .session_manager()
+                                        .send_to_input(
+                                            session_id,
+                                            crate::app::session::StreamerToInputMessage::Signaling(signaling),
+                                        )
+                                        .await;
+                                }
+                            }
+                            Some(StreamerIpcMessage::InputReady) => {
+                                if let Some(ref session_id) = hybrid_session_id_for_input {
+                                    debug!("[Ipc]: Input peer ready, notifying input client");
+                                    web_app_for_input
+                                        .session_manager()
+                                        .send_to_input(
+                                            session_id,
+                                            crate::app::session::StreamerToInputMessage::Ready,
+                                        )
+                                        .await;
+                                }
+                            }
+                            Some(StreamerIpcMessage::Stop) => {
+                                debug!("[Ipc]: ipc receiver stopped by streamer");
+                                break;
+                            }
+                            None => {
+                                debug!("[Ipc]: ipc receiver channel closed");
+                                break;
+                            }
+                        }
+                    }
+                    session_event = session_event_rx.recv() => {
+                        match session_event {
+                            Some(SessionEvent::InputJoined) => {
+                                debug!("[Stream]: Input connection joined");
+                                if let Err(Closed) = send_ws_message(
+                                    &mut session,
+                                    StreamServerMessage::InputJoined,
+                                ).await {
+                                    warn!("[Stream]: Failed to send InputJoined to client");
+                                    break;
+                                }
+                            }
+                            Some(SessionEvent::InputDisconnected) => {
+                                debug!("[Stream]: Input connection disconnected");
+                                if let Err(Closed) = send_ws_message(
+                                    &mut session,
+                                    StreamServerMessage::InputDisconnected,
+                                ).await {
+                                    warn!("[Stream]: Failed to send InputDisconnected to client");
+                                    break;
+                                }
+                            }
+                            Some(SessionEvent::ReconnectionTokenAvailable(token)) => {
+                                debug!("[Stream]: Reconnection token available: {}", token);
+                                if let Err(Closed) = send_ws_message(
+                                    &mut session,
+                                    StreamServerMessage::ReconnectionTokenAvailable {
+                                        session_token: token,
+                                    },
+                                ).await {
+                                    warn!("[Stream]: Failed to send ReconnectionTokenAvailable to client");
+                                    break;
+                                }
+                            }
+                            Some(SessionEvent::PrimaryDisconnected) => {
+                                // This shouldn't happen as we ARE the primary
+                                warn!("[Stream]: Received unexpected PrimaryDisconnected event");
+                            }
+                            None => {
+                                // Session event channel closed, continue with IPC only
+                                debug!("[Stream]: Session event channel closed");
+                            }
+                        }
                     }
                 }
             }
-            info!("[Ipc]: ipc receiver is closed");
+            info!("[Ipc]: ipc receiver loop ended");
+
+            // Clean up hybrid session if applicable
+            if let Some(session_id) = hybrid_session_id_cleanup {
+                web_app_cleanup
+                    .session_manager()
+                    .primary_disconnected(&session_id)
+                    .await;
+            }
 
             // close the websocket when the streamer crashed / disconnected / whatever
             if let Err(err) = session.close(None).await {
@@ -274,6 +430,7 @@ pub async fn start_host(
                 client_certificate: pair_info.client_certificate,
                 server_certificate: pair_info.server_certificate,
                 app_id: app_id.0,
+                session_token,
             })
             .await;
 

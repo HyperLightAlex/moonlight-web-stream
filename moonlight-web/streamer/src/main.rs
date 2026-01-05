@@ -92,6 +92,7 @@ async fn main() {
         client_certificate,
         server_certificate,
         app_id,
+        session_token,
     ) = loop {
         match ipc_receiver.recv().await {
             Some(ServerIpcMessage::Init {
@@ -104,6 +105,7 @@ async fn main() {
                 client_certificate,
                 server_certificate,
                 app_id,
+                session_token,
             }) => {
                 debug!(
                     "Client supported codecs: {:?}",
@@ -123,6 +125,7 @@ async fn main() {
                     client_certificate,
                     server_certificate,
                     app_id,
+                    session_token,
                 );
             }
             _ => continue,
@@ -176,6 +179,7 @@ async fn main() {
         ipc_sender.clone(),
         ipc_receiver,
         config,
+        session_token,
     )
     .await
     .expect("failed to create connection");
@@ -234,8 +238,9 @@ impl StreamConnection {
         ipc_sender: IpcSender<StreamerIpcMessage>,
         mut ipc_receiver: IpcReceiver<ServerIpcMessage>,
         config: StreamerConfig,
+        session_token: Option<String>,
     ) -> Result<Arc<Self>, anyhow::Error> {
-        let (sender, mut events) = webrtc::new(settings.clone(), &config.webrtc).await?;
+        let (sender, mut events) = webrtc::new(settings.clone(), &config.webrtc, session_token).await?;
 
         let this = Arc::new(Self {
             runtime: Handle::current(),
