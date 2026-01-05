@@ -28,6 +28,7 @@ async function startApp() {
 
     const hostIdStr = queryParams.get("hostId")
     const appIdStr = queryParams.get("appId")
+    const hybridStr = queryParams.get("hybrid")
     if (hostIdStr == null || appIdStr == null) {
         await showMessage("No Host or no App Id found")
 
@@ -36,6 +37,11 @@ async function startApp() {
     }
     const hostId = Number.parseInt(hostIdStr)
     const appId = Number.parseInt(appIdStr)
+    const hybridMode = hybridStr === "true"
+
+    if (hybridMode) {
+        console.info("[Hybrid]: Hybrid streaming mode enabled - input handled by native client")
+    }
 
     // event propagation on overlays
     const sidebarRoot = getSidebarRoot()
@@ -49,7 +55,7 @@ async function startApp() {
     }
 
     // Start and Mount App
-    const app = new ViewerApp(api, hostId, appId)
+    const app = new ViewerApp(api, hostId, appId, hybridMode)
     app.mount(rootElement)
 }
 
@@ -80,13 +86,17 @@ class ViewerApp implements Component {
     private previousMouseMode: MouseMode
     private toggleFullscreenWithKeybind: boolean
     private hasShownFullscreenEscapeWarning = false
+    private hybridMode: boolean
 
-    constructor(api: Api, hostId: number, appId: number) {
+    constructor(api: Api, hostId: number, appId: number, hybridMode: boolean = false) {
         this.api = api
+        this.hybridMode = hybridMode
 
-        // Configure sidebar
+        // Configure sidebar (hide in hybrid mode as native handles input)
         this.sidebar = new ViewerSidebar(this)
-        setSidebar(this.sidebar)
+        if (!hybridMode) {
+            setSidebar(this.sidebar)
+        }
 
         // Configure stats element
         this.statsDiv.hidden = true
@@ -118,28 +128,33 @@ class ViewerApp implements Component {
 
         this.settings = settings
 
-        // Configure input
-        this.addListeners(document)
-        this.addListeners(document.getElementById("input") as HTMLDivElement)
+        // Configure input (skip in hybrid mode - native client handles it)
+        if (!hybridMode) {
+            this.addListeners(document)
+            this.addListeners(document.getElementById("input") as HTMLDivElement)
+        }
 
-        window.addEventListener("blur", () => {
-            this.stream?.getInput().raiseAllKeys()
-        })
-        document.addEventListener("visibilitychange", () => {
-            if (document.visibilityState !== "visible") {
+        // Skip input-related event listeners in hybrid mode
+        if (!hybridMode) {
+            window.addEventListener("blur", () => {
                 this.stream?.getInput().raiseAllKeys()
-            }
-        })
+            })
+            document.addEventListener("visibilitychange", () => {
+                if (document.visibilityState !== "visible") {
+                    this.stream?.getInput().raiseAllKeys()
+                }
+            })
 
-        document.addEventListener("pointerlockchange", this.onPointerLockChange.bind(this))
-        document.addEventListener("fullscreenchange", this.onFullscreenChange.bind(this))
+            document.addEventListener("pointerlockchange", this.onPointerLockChange.bind(this))
+            document.addEventListener("fullscreenchange", this.onFullscreenChange.bind(this))
 
-        window.addEventListener("gamepadconnected", this.onGamepadConnect.bind(this))
-        window.addEventListener("gamepaddisconnected", this.onGamepadDisconnect.bind(this))
-        // Connect all gamepads
-        for (const gamepad of navigator.getGamepads()) {
-            if (gamepad != null) {
-                this.onGamepadAdd(gamepad)
+            window.addEventListener("gamepadconnected", this.onGamepadConnect.bind(this))
+            window.addEventListener("gamepaddisconnected", this.onGamepadDisconnect.bind(this))
+            // Connect all gamepads
+            for (const gamepad of navigator.getGamepads()) {
+                if (gamepad != null) {
+                    this.onGamepadAdd(gamepad)
+                }
             }
         }
     }
@@ -220,7 +235,7 @@ class ViewerApp implements Component {
             throw "Couldn't find any supported video format. Change the codec option to H264 in the settings if you're unsure which codecs are supported."
         }
 
-        this.stream = new Stream(this.api, hostId, appId, settings, supportedVideoFormats, browserSize)
+        this.stream = new Stream(this.api, hostId, appId, settings, supportedVideoFormats, browserSize, this.hybridMode)
 
         // Add app info listener
         this.stream.addInfoListener(this.onInfo.bind(this))

@@ -49,6 +49,10 @@ export function getStreamerSize(settings: StreamSettings, viewerScreenSize: [num
     return [width, height]
 }
 
+// Event for hybrid mode session token
+export type SessionTokenEvent = CustomEvent<{ sessionToken: string }>
+export type SessionTokenEventListener = (event: SessionTokenEvent) => void
+
 export class Stream implements Component {
     private logger: Logger = new Logger()
 
@@ -56,6 +60,7 @@ export class Stream implements Component {
 
     private hostId: number
     private appId: number
+    private hybridMode: boolean
 
     private settings: StreamSettings
 
@@ -64,6 +69,7 @@ export class Stream implements Component {
 
     private ws: WebSocket
     private iceServers: Array<RTCIceServer> | null = null
+    private sessionToken: string | null = null
 
     private videoRenderer: VideoRenderer | null = null
     private audioPlayer: AudioPlayer | null = null
@@ -73,7 +79,7 @@ export class Stream implements Component {
 
     private streamerSize: [number, number]
 
-    constructor(api: Api, hostId: number, appId: number, settings: StreamSettings, supportedVideoFormats: VideoCodecSupport, viewerScreenSize: [number, number]) {
+    constructor(api: Api, hostId: number, appId: number, settings: StreamSettings, supportedVideoFormats: VideoCodecSupport, viewerScreenSize: [number, number], hybridMode: boolean = false) {
         this.logger.addInfoListener((info, type) => {
             this.debugLog(info, type ?? undefined)
         })
@@ -82,6 +88,7 @@ export class Stream implements Component {
 
         this.hostId = hostId
         this.appId = appId
+        this.hybridMode = hybridMode
 
         this.settings = settings
 
@@ -98,6 +105,10 @@ export class Stream implements Component {
 
         const fps = this.settings.fps
 
+        if (hybridMode) {
+            this.debugLog("Hybrid mode enabled - input will be handled by native client")
+        }
+
         this.sendWsMessage({
             Init: {
                 host_id: this.hostId,
@@ -113,6 +124,7 @@ export class Stream implements Component {
                 video_supported_formats: createSupportedVideoFormatsBits(supportedVideoFormats),
                 video_colorspace: "Rec709", // TODO <---
                 video_color_range_full: true, // TODO <---
+                hybrid_mode: this.hybridMode,
             }
         })
 
@@ -183,12 +195,30 @@ export class Stream implements Component {
             })
 
             this.eventTarget.dispatchEvent(event)
+
+            // Notify AndroidBridge of error
+            const errorMsg = `Stage failed: ${message.StageFailed.stage} (error ${message.StageFailed.error_code})`
+            if ((window as any).AndroidBridge?.onStreamError) {
+                (window as any).AndroidBridge.onStreamError(errorMsg)
+            }
+            window.dispatchEvent(new CustomEvent('streamError', {
+                detail: { message: errorMsg }
+            }))
         } else if ("ConnectionTerminated" in message) {
             const event: InfoEvent = new CustomEvent("stream-info", {
                 detail: { type: "connectionTerminated", errorCode: message.ConnectionTerminated.error_code }
             })
 
             this.eventTarget.dispatchEvent(event)
+
+            // Notify AndroidBridge of error
+            const errorMsg = `Connection terminated (error ${message.ConnectionTerminated.error_code})`
+            if ((window as any).AndroidBridge?.onStreamError) {
+                (window as any).AndroidBridge.onStreamError(errorMsg)
+            }
+            window.dispatchEvent(new CustomEvent('streamError', {
+                detail: { message: errorMsg }
+            }))
         } else if ("UpdateApp" in message) {
             const event: InfoEvent = new CustomEvent("stream-info", {
                 detail: { type: "app", app: message.UpdateApp.app }
@@ -214,7 +244,10 @@ export class Stream implements Component {
 
             this.eventTarget.dispatchEvent(event)
 
-            this.input.onStreamStart(capabilities, [width, height])
+            // In hybrid mode, skip input setup as native client handles it
+            if (!this.hybridMode) {
+                this.input.onStreamStart(capabilities, [width, height])
+            }
 
             this.stats.setVideoInfo(format ?? "Unknown", width, height, fps)
 
@@ -231,16 +264,53 @@ export class Stream implements Component {
 
             this.debugLog(`Using video pipeline: ${this.transport?.getChannel(TransportChannelId.HOST_VIDEO).type} (transport) -> ${this.videoRenderer?.implementationName} (renderer)`)
             this.debugLog(`Using audio pipeline: ${this.transport?.getChannel(TransportChannelId.HOST_AUDIO).type} (transport) -> ${this.audioPlayer?.implementationName} (player)`)
+
+            // Notify AndroidBridge if available (for hybrid mode)
+            ;(window as any).streamConnected = true
+            ;(window as any).streamWidth = width
+            ;(window as any).streamHeight = height
+            ;(window as any).streamFps = fps
+            ;(window as any).streamCodec = format
+
+            if ((window as any).AndroidBridge?.onStreamConnected) {
+                (window as any).AndroidBridge.onStreamConnected(width, height, fps, format)
+            }
+
+            // Dispatch custom event for any listeners
+            window.dispatchEvent(new CustomEvent('streamConnected', {
+                detail: { width, height, fps, codec: format }
+            }))
         }
         // -- WebRTC Config
         else if ("Setup" in message) {
             const iceServers = message.Setup.ice_servers
+            const sessionToken = message.Setup.session_token
 
             this.iceServers = iceServers
 
             this.debugLog(`Using WebRTC Ice Servers: ${createPrettyList(
                 iceServers.map(server => server.urls).reduce((list, url) => list.concat(url), [])
             )}`)
+
+            // Handle session token for hybrid mode
+            if (sessionToken) {
+                this.sessionToken = sessionToken
+                this.debugLog(`Hybrid mode session token received: ${sessionToken}`)
+                
+                // Dispatch event for native bridge
+                const event: SessionTokenEvent = new CustomEvent("session-token", {
+                    detail: { sessionToken }
+                })
+                this.eventTarget.dispatchEvent(event)
+                
+                // Also set on window for AndroidBridge to access
+                ;(window as any).sessionToken = sessionToken
+                
+                // If AndroidBridge is available, notify it immediately
+                if ((window as any).AndroidBridge?.onSessionToken) {
+                    (window as any).AndroidBridge.onSessionToken(sessionToken)
+                }
+            }
 
             await this.startConnection()
         }
@@ -441,6 +511,13 @@ export class Stream implements Component {
         this.eventTarget.removeEventListener("stream-info", listener as EventListenerOrEventListenerObject)
     }
 
+    addSessionTokenListener(listener: SessionTokenEventListener) {
+        this.eventTarget.addEventListener("session-token", listener as EventListenerOrEventListenerObject)
+    }
+    removeSessionTokenListener(listener: SessionTokenEventListener) {
+        this.eventTarget.removeEventListener("session-token", listener as EventListenerOrEventListenerObject)
+    }
+
     getInput(): StreamInput {
         return this.input
     }
@@ -450,6 +527,14 @@ export class Stream implements Component {
 
     getStreamerSize(): [number, number] {
         return this.streamerSize
+    }
+
+    getSessionToken(): string | null {
+        return this.sessionToken
+    }
+
+    isHybridMode(): boolean {
+        return this.hybridMode
     }
 }
 
