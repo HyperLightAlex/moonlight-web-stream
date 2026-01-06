@@ -35,7 +35,7 @@ use webrtc::{
         APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
         setting_engine::SettingEngine,
     },
-    data_channel::{RTCDataChannel, data_channel_message::DataChannelMessage},
+    data_channel::{RTCDataChannel, data_channel_init::RTCDataChannelInit, data_channel_message::DataChannelMessage},
     ice::udp_network::{EphemeralUDP, UDPNetwork},
     ice_transport::{
         ice_candidate::{RTCIceCandidate, RTCIceCandidateInit},
@@ -603,7 +603,7 @@ impl WebRtcInner {
             })
         });
 
-        // -- Data channel handler for input peer
+        // -- Data channel handler for input peer (for channels created by client)
         input_peer.on_data_channel({
             let inner = inner.clone();
             Box::new(move |channel: Arc<RTCDataChannel>| {
@@ -631,13 +631,71 @@ impl WebRtcInner {
             })
         });
 
+        // ===== CREATE DATA CHANNELS BEFORE GENERATING OFFER =====
+        // Data channels MUST be created before the SDP offer so they are included in the offer
+        
+        // Create ordered data channels for reliable input
+        let ordered_config = RTCDataChannelInit {
+            ordered: Some(true),
+            ..Default::default()
+        };
+        
+        // Create unordered data channels for low-latency input
+        let unordered_config = RTCDataChannelInit {
+            ordered: Some(false),
+            max_retransmits: Some(0),
+            ..Default::default()
+        };
+
+        // Mouse channels
+        if let Err(err) = input_peer.create_data_channel("mouse_reliable", Some(ordered_config.clone())).await {
+            error!("[InputPeer]: Failed to create mouse_reliable channel: {err:?}");
+        }
+        if let Err(err) = input_peer.create_data_channel("mouse_absolute", Some(unordered_config.clone())).await {
+            error!("[InputPeer]: Failed to create mouse_absolute channel: {err:?}");
+        }
+        if let Err(err) = input_peer.create_data_channel("mouse_relative", Some(unordered_config.clone())).await {
+            error!("[InputPeer]: Failed to create mouse_relative channel: {err:?}");
+        }
+
+        // Keyboard channel (ordered for key sequence integrity)
+        if let Err(err) = input_peer.create_data_channel("keyboard", Some(ordered_config.clone())).await {
+            error!("[InputPeer]: Failed to create keyboard channel: {err:?}");
+        }
+
+        // Touch channel (ordered)
+        if let Err(err) = input_peer.create_data_channel("touch", Some(ordered_config.clone())).await {
+            error!("[InputPeer]: Failed to create touch channel: {err:?}");
+        }
+
+        // Controllers channel (unordered for low latency)
+        if let Err(err) = input_peer.create_data_channel("controllers", Some(unordered_config.clone())).await {
+            error!("[InputPeer]: Failed to create controllers channel: {err:?}");
+        }
+
+        // Individual controller channels (controller0 through controller15)
+        for i in 0..16 {
+            let channel_name = format!("controller{}", i);
+            if let Err(err) = input_peer.create_data_channel(&channel_name, Some(unordered_config.clone())).await {
+                error!("[InputPeer]: Failed to create {} channel: {err:?}", channel_name);
+            }
+        }
+
+        // Stats channel for latency info (ordered)
+        if let Err(err) = input_peer.create_data_channel("stats", Some(ordered_config.clone())).await {
+            error!("[InputPeer]: Failed to create stats channel: {err:?}");
+        }
+
+        info!("[InputPeer]: Created all input data channels");
+
         // Store the input peer
         {
             let mut input_peer_guard = self.input_peer.lock().await;
             *input_peer_guard = Some(input_peer.clone());
         }
 
-        // Create an offer for the input peer (server-initiated)
+        // Now create an offer for the input peer (server-initiated)
+        // The offer will now include all the data channels we created
         match input_peer.create_offer(None).await {
             Ok(offer) => {
                 if let Err(err) = input_peer.set_local_description(offer.clone()).await {
@@ -645,7 +703,9 @@ impl WebRtcInner {
                     return;
                 }
 
-                debug!("[InputPeer]: Sending offer to input client");
+                info!("[InputPeer]: Sending offer to input client (SDP includes {} bytes)", offer.sdp.len());
+                debug!("[InputPeer]: SDP offer:\n{}", offer.sdp);
+                
                 if let Err(err) = self
                     .event_sender
                     .send(TransportEvent::SendIpc(StreamerIpcMessage::InputSignaling(

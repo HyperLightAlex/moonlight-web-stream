@@ -10,7 +10,6 @@ use common::{
     serialize_json,
 };
 use log::{debug, error, info, warn};
-use tokio::select;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::app::{
@@ -179,7 +178,7 @@ async fn handle_input_session(
     web_app: Data<App>,
 ) {
     loop {
-        select! {
+        tokio::select! {
             // Messages from WebSocket (input client)
             ws_msg = ws_stream.recv() => {
                 match ws_msg {

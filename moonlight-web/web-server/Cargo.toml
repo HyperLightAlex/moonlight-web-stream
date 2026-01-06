@@ -8,7 +8,7 @@ license = { workspace = true }
 moonlight-common = { workspace = true, features = ["high"] }
 common = { path = "../common" }
 
-tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "macros"] }
 reqwest = { workspace = true, features = ["native-tls", "json"] }
 urlencoding = "2.1"
 
