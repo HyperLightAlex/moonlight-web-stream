@@ -23,10 +23,9 @@ use crate::{
         storage::StorageHostModify,
         user::{AuthenticatedUser, Role, UserId},
     },
-    remote_access::RemoteAccessProvider,
 };
 use common::api_bindings::{
-    self, DeleteHostQuery, DetailedHost, DetailedUser, GetAppImageQuery, GetAppsQuery, GetAppsResponse,
+    self, DeleteHostQuery, DetailedUser, GetAppImageQuery, GetAppsQuery, GetAppsResponse,
     GetHostQuery, GetHostResponse, GetHostsResponse, GetUserQuery, PatchHostRequest,
     PostHostRequest, PostHostResponse, PostPairRequest, PostPairResponse1, PostPairResponse2,
     PostWakeUpRequest, UndetailedHost,
@@ -121,27 +120,16 @@ async fn list_hosts(
     Ok(stream_response)
 }
 
-/// Attach remote access info to a DetailedHost if available.
-fn attach_remote_access(
-    mut host: DetailedHost,
-    remote_provider: &RemoteAccessProvider,
-) -> DetailedHost {
-    host.remote_access = remote_provider.get_info();
-    host
-}
-
 #[get("/host")]
 async fn get_host(
     mut user: AuthenticatedUser,
     Query(query): Query<GetHostQuery>,
-    remote_provider: Data<RemoteAccessProvider>,
 ) -> Result<Json<GetHostResponse>, AppError> {
     let host_id = HostId(query.host_id);
 
     let mut host = user.host(host_id).await?;
 
     let detailed = host.detailed_host(&mut user).await?;
-    let detailed = attach_remote_access(detailed, &remote_provider);
 
     Ok(Json(GetHostResponse { host: detailed }))
 }
@@ -151,7 +139,6 @@ async fn post_host(
     app: Data<App>,
     mut user: AuthenticatedUser,
     Json(request): Json<PostHostRequest>,
-    remote_provider: Data<RemoteAccessProvider>,
 ) -> Result<Json<PostHostResponse>, AppError> {
     let mut host = user
         .host_add(
@@ -162,10 +149,9 @@ async fn post_host(
         )
         .await?;
 
-    let detailed = host.detailed_host(&mut user).await?;
-    let detailed = attach_remote_access(detailed, &remote_provider);
-
-    Ok(Json(PostHostResponse { host: detailed }))
+    Ok(Json(PostHostResponse {
+        host: host.detailed_host(&mut user).await?,
+    }))
 }
 
 #[patch("/host")]
@@ -212,7 +198,6 @@ async fn delete_host(
 async fn pair_host(
     mut user: AuthenticatedUser,
     Json(request): Json<PostPairRequest>,
-    remote_provider: Data<RemoteAccessProvider>,
 ) -> Result<StreamedResponse<PostPairResponse1, PostPairResponse2>, AppError> {
     use common::api_bindings::HostType;
 
@@ -223,16 +208,12 @@ async fn pair_host(
     // Detect if this is a Backlight host
     let host_type = host.detect_host_type(&mut user).await.unwrap_or(HostType::Standard);
 
-    // Clone remote access info for use in spawned tasks
-    let remote_access_info = remote_provider.get_info();
-
     match host_type {
         HostType::Backlight => {
             // Backlight host: auto-pair using OTP (no PIN needed)
             let (stream_response, stream_sender) =
                 StreamedResponse::new(PostPairResponse1::BacklightAutoPairing);
 
-            let remote_info = remote_access_info.clone();
             spawn(async move {
                 let result = host.pair_fuji(&mut user).await;
 
@@ -242,9 +223,7 @@ async fn pair_host(
                 };
 
                 match result {
-                    Ok(mut detailed_host) => {
-                        // Attach remote access info for client to use
-                        detailed_host.remote_access = remote_info;
+                    Ok(detailed_host) => {
                         if let Err(err) = stream_sender
                             .send(PostPairResponse2::Paired(detailed_host))
                             .await
@@ -270,7 +249,6 @@ async fn pair_host(
             let (stream_response, stream_sender) =
                 StreamedResponse::new(PostPairResponse1::Pin(pin.to_string()));
 
-            let remote_info = remote_access_info;
             spawn(async move {
                 let result = host.pair(&mut user, pin).await;
 
@@ -280,9 +258,7 @@ async fn pair_host(
                 };
 
                 match result {
-                    Ok(mut detailed_host) => {
-                        // Attach remote access info for client to use
-                        detailed_host.remote_access = remote_info;
+                    Ok(detailed_host) => {
                         if let Err(err) = stream_sender
                             .send(PostPairResponse2::Paired(detailed_host))
                             .await

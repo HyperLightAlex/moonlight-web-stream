@@ -240,10 +240,16 @@ class ViewerApp implements Component {
         // Add app info listener
         this.stream.addInfoListener(this.onInfo.bind(this))
 
-        // Create connection info modal
-        const connectionInfo = new ConnectionInfoModal()
-        this.stream.addInfoListener(connectionInfo.onInfo.bind(connectionInfo))
-        showModal(connectionInfo)
+        // In hybrid mode, don't show the connection modal - Android has its own loading UI
+        if (!hybridMode) {
+            // Create connection info modal
+            const connectionInfo = new ConnectionInfoModal()
+            this.stream.addInfoListener(connectionInfo.onInfo.bind(connectionInfo))
+            showModal(connectionInfo)
+        } else {
+            // In hybrid mode, hide all UI elements and only show video
+            document.body.classList.add("hybrid-mode")
+        }
 
         // Start animation frame loop
         this.onTouchUpdate()
