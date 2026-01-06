@@ -633,6 +633,8 @@ impl WebRtcInner {
 
         // ===== CREATE DATA CHANNELS BEFORE GENERATING OFFER =====
         // Data channels MUST be created before the SDP offer so they are included in the offer
+        // Since the server creates the channels, we must attach message handlers directly
+        // (on_data_channel callback only fires for remotely-created channels)
         
         // Create ordered data channels for reliable input
         let ordered_config = RTCDataChannelInit {
@@ -647,46 +649,92 @@ impl WebRtcInner {
             ..Default::default()
         };
 
+        // Helper to create channel and attach message handler
+        async fn create_input_channel(
+            peer: &RTCPeerConnection,
+            name: &str,
+            config: RTCDataChannelInit,
+            inner: &Weak<WebRtcInner>,
+            channel_type: TransportChannel,
+        ) -> Option<Arc<RTCDataChannel>> {
+            match peer.create_data_channel(name, Some(config)).await {
+                Ok(channel) => {
+                    channel.on_message(create_channel_message_handler(inner.clone(), channel_type));
+                    info!("[InputPeer]: Created and attached handler for channel: {}", name);
+                    Some(channel)
+                }
+                Err(err) => {
+                    error!("[InputPeer]: Failed to create {} channel: {err:?}", name);
+                    None
+                }
+            }
+        }
+
         // Mouse channels
-        if let Err(err) = input_peer.create_data_channel("mouse_reliable", Some(ordered_config.clone())).await {
-            error!("[InputPeer]: Failed to create mouse_reliable channel: {err:?}");
-        }
-        if let Err(err) = input_peer.create_data_channel("mouse_absolute", Some(unordered_config.clone())).await {
-            error!("[InputPeer]: Failed to create mouse_absolute channel: {err:?}");
-        }
-        if let Err(err) = input_peer.create_data_channel("mouse_relative", Some(unordered_config.clone())).await {
-            error!("[InputPeer]: Failed to create mouse_relative channel: {err:?}");
-        }
+        create_input_channel(
+            &input_peer, "mouse_reliable", ordered_config.clone(), &inner,
+            TransportChannel(TransportChannelId::MOUSE_RELIABLE)
+        ).await;
+        create_input_channel(
+            &input_peer, "mouse_absolute", unordered_config.clone(), &inner,
+            TransportChannel(TransportChannelId::MOUSE_ABSOLUTE)
+        ).await;
+        create_input_channel(
+            &input_peer, "mouse_relative", unordered_config.clone(), &inner,
+            TransportChannel(TransportChannelId::MOUSE_RELATIVE)
+        ).await;
 
         // Keyboard channel (ordered for key sequence integrity)
-        if let Err(err) = input_peer.create_data_channel("keyboard", Some(ordered_config.clone())).await {
-            error!("[InputPeer]: Failed to create keyboard channel: {err:?}");
-        }
+        create_input_channel(
+            &input_peer, "keyboard", ordered_config.clone(), &inner,
+            TransportChannel(TransportChannelId::KEYBOARD)
+        ).await;
 
         // Touch channel (ordered)
-        if let Err(err) = input_peer.create_data_channel("touch", Some(ordered_config.clone())).await {
-            error!("[InputPeer]: Failed to create touch channel: {err:?}");
-        }
+        create_input_channel(
+            &input_peer, "touch", ordered_config.clone(), &inner,
+            TransportChannel(TransportChannelId::TOUCH)
+        ).await;
 
         // Controllers channel (unordered for low latency)
-        if let Err(err) = input_peer.create_data_channel("controllers", Some(unordered_config.clone())).await {
-            error!("[InputPeer]: Failed to create controllers channel: {err:?}");
-        }
+        create_input_channel(
+            &input_peer, "controllers", unordered_config.clone(), &inner,
+            TransportChannel(TransportChannelId::CONTROLLERS)
+        ).await;
 
         // Individual controller channels (controller0 through controller15)
         for i in 0..16 {
             let channel_name = format!("controller{}", i);
-            if let Err(err) = input_peer.create_data_channel(&channel_name, Some(unordered_config.clone())).await {
-                error!("[InputPeer]: Failed to create {} channel: {err:?}", channel_name);
-            }
+            create_input_channel(
+                &input_peer, &channel_name, unordered_config.clone(), &inner,
+                TransportChannel(InboundPacket::CONTROLLER_CHANNELS[i])
+            ).await;
         }
 
-        // Stats channel for latency info (ordered)
-        if let Err(err) = input_peer.create_data_channel("stats", Some(ordered_config.clone())).await {
-            error!("[InputPeer]: Failed to create stats channel: {err:?}");
+        // Stats channel for latency info (ordered) - store reference for sending stats
+        if let Ok(stats_channel) = input_peer.create_data_channel("stats", Some(ordered_config.clone())).await {
+            stats_channel.on_close({
+                let this = inner.clone();
+                Box::new(move || {
+                    let this = this.clone();
+                    Box::pin(async move {
+                        let Some(this) = this.upgrade() else {
+                            return;
+                        };
+                        let mut input_stats = this.input_stats_channel.lock().await;
+                        *input_stats = None;
+                        info!("[InputPeer]: Input stats channel closed");
+                    })
+                })
+            });
+            let mut input_stats = self.input_stats_channel.lock().await;
+            *input_stats = Some(stats_channel);
+            info!("[InputPeer]: Created and stored stats channel");
+        } else {
+            error!("[InputPeer]: Failed to create stats channel");
         }
 
-        info!("[InputPeer]: Created all input data channels");
+        info!("[InputPeer]: Created all input data channels with message handlers");
 
         // Store the input peer
         {

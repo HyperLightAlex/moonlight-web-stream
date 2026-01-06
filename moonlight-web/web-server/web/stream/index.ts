@@ -269,6 +269,15 @@ export class Stream implements Component {
             this.debugLog(`Using video pipeline: ${this.transport?.getChannel(TransportChannelId.HOST_VIDEO).type} (transport) -> ${this.videoRenderer?.implementationName} (renderer)`)
             this.debugLog(`Using audio pipeline: ${this.transport?.getChannel(TransportChannelId.HOST_AUDIO).type} (transport) -> ${this.audioPlayer?.implementationName} (player)`)
 
+            // In hybrid mode, auto-start video and audio since input is handled by native client
+            // and we won't receive user interaction events in the WebView
+            if (this.hybridMode) {
+                this.debugLog("Hybrid mode: auto-starting video and audio playback")
+                // Trigger the same actions as onUserInteraction() to unmute audio and ensure video plays
+                this.videoRenderer?.onUserInteraction()
+                this.audioPlayer?.onUserInteraction()
+            }
+
             // Notify AndroidBridge if available (for hybrid mode)
             ;(window as any).streamConnected = true
             ;(window as any).streamWidth = width

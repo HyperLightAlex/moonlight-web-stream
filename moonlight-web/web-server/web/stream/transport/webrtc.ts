@@ -457,6 +457,7 @@ class WebRTCInboundTrackTransportChannel<T extends string> implements TrackTrans
             return
         }
 
+        console.info(`[WebRTC-Channel]: onTrack called for ${this.label}, listeners count: ${this.trackListeners.length}`)
         for (const listener of this.trackListeners) {
             listener(track)
         }
@@ -465,7 +466,9 @@ class WebRTCInboundTrackTransportChannel<T extends string> implements TrackTrans
 
     private trackListeners: Array<(track: MediaStreamTrack) => void> = []
     addTrackListener(listener: (track: MediaStreamTrack) => void): void {
+        console.info(`[WebRTC-Channel]: addTrackListener called for ${this.label}, track already exists: ${!!this.trackHolder.track}`)
         if (this.trackHolder.track) {
+            console.info(`[WebRTC-Channel]: Calling listener immediately with existing track for ${this.label}`)
             listener(this.trackHolder.track)
         }
         this.trackListeners.push(listener)

@@ -275,11 +275,17 @@ impl StreamConnection {
                                 return;
                             };
 
-                            if let Err(err) = this.start_stream().await {
-                                error!("Failed to start stream, stopping: {err:?}");
+                            // Spawn start_stream in a separate task so the event loop
+                            // continues processing WebRTC signaling messages (like video
+                            // renegotiation offers). This is critical for hybrid mode where
+                            // input peer negotiation and video setup happen concurrently.
+                            spawn(async move {
+                                if let Err(err) = this.start_stream().await {
+                                    error!("Failed to start stream, stopping: {err:?}");
 
-                                this.stop().await;
-                            }
+                                    this.stop().await;
+                                }
+                            });
                         }
                         Ok(TransportEvent::RecvPacket(packet)) => {
                             let Some(this) = this.upgrade() else {

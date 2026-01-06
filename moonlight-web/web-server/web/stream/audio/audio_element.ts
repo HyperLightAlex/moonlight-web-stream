@@ -43,7 +43,15 @@ export class AudioElementPlayer extends TrackAudioPlayer {
     }
 
     onUserInteraction(): void {
+        console.info("[AudioElement]: onUserInteraction - unmuting and playing audio")
         this.audioElement.muted = false
+        
+        // Explicitly call play() in case autoplay didn't work
+        this.audioElement.play().then(() => {
+            console.info("[AudioElement]: Audio playback started successfully")
+        }).catch(error => {
+            console.warn(`[AudioElement]: Audio play failed: ${error.message || error}`)
+        })
     }
 
     mount(parent: HTMLElement): void {
