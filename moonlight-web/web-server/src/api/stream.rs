@@ -258,32 +258,36 @@ pub async fn start_host(
         // Spawn task to forward input messages to streamer (if hybrid mode)
         if let Some(mut input_rx) = input_msg_rx {
             let hybrid_session_id_input = hybrid_session_id.clone();
+            info!("[Stream]: Starting input message forwarder for session {:?}", hybrid_session_id_input);
             spawn(async move {
+                info!("[Stream]: Input message forwarder task started");
                 while let Some(msg) = input_rx.recv().await {
                     match msg {
                         InputToStreamerMessage::Joined => {
-                            debug!("[Stream]: Input connection joined, notifying streamer");
+                            info!("[Stream]: >>> Input connection joined, forwarding to streamer via IPC");
                             ipc_sender_for_input.send(ServerIpcMessage::InputJoined).await;
                         }
                         InputToStreamerMessage::Signaling(signaling) => {
-                            debug!("[Stream]: Forwarding input signaling to streamer");
+                            info!("[Stream]: >>> Forwarding input signaling to streamer: {:?}", signaling);
                             ipc_sender_for_input
                                 .send(ServerIpcMessage::InputWebSocket(signaling))
                                 .await;
                         }
                         InputToStreamerMessage::Disconnected => {
-                            debug!("[Stream]: Input connection disconnected, notifying streamer");
+                            info!("[Stream]: >>> Input connection disconnected, notifying streamer");
                             ipc_sender_for_input
                                 .send(ServerIpcMessage::InputDisconnected)
                                 .await;
                         }
                     }
                 }
-                debug!(
+                info!(
                     "[Stream]: Input message receiver closed for session {:?}",
                     hybrid_session_id_input
                 );
             });
+        } else {
+            info!("[Stream]: No input_msg_rx, hybrid mode not enabled or receiver not created");
         }
 
         // Clone for forwarding input signaling from streamer

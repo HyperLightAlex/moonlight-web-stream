@@ -185,7 +185,8 @@ async fn handle_input_session(
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<InputClientMessage>(&text) {
                             Ok(InputClientMessage::WebRtc(signaling)) => {
-                                debug!("[Input]: Received signaling from client");
+                                info!("[Input]: >>> Received signaling from client: {:?}", signaling);
+                                info!("[Input]: >>> Sending to input_to_streamer_tx channel");
                                 if let Err(err) = input_to_streamer_tx
                                     .send(InputToStreamerMessage::Signaling(signaling))
                                     .await
@@ -193,6 +194,7 @@ async fn handle_input_session(
                                     warn!("[Input]: Failed to forward signaling to streamer: {err:?}");
                                     break;
                                 }
+                                info!("[Input]: >>> Signaling sent successfully to channel");
                             }
                             Ok(InputClientMessage::Join { .. }) => {
                                 warn!("[Input]: Received unexpected Join message after session established");
