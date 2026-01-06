@@ -162,6 +162,10 @@ export class Stream implements Component {
 
     private debugLog(message: string, type?: "fatal" | "recover") {
         for (const line of message.split("\n")) {
+            // Always log to console for debugging, especially in hybrid mode
+            // where ConnectionInfoModal is not shown
+            console.info(`[Stream]: ${line}`)
+            
             const event: InfoEvent = new CustomEvent("stream-info", {
                 detail: { type: "addDebugLine", line, additional: type }
             })

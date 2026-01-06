@@ -62,12 +62,14 @@ export class WebRTCTransport implements Transport {
     async onReceiveMessage(message: StreamSignalingMessage) {
         if ("Description" in message) {
             const description = message.Description;
+            console.info(`[WebRTC]: Received remote description type: ${description.ty}`)
             await this.handleRemoteDescription({
                 type: description.ty as RTCSdpType,
                 sdp: description.sdp
             })
         } else if ("AddIceCandidate" in message) {
             const candidate = message.AddIceCandidate
+            console.info(`[WebRTC]: Received ICE candidate: ${candidate.candidate?.substring(0, 50)}...`)
             await this.addIceCandidate({
                 candidate: candidate.candidate,
                 sdpMid: candidate.sdp_mid,
@@ -84,13 +86,16 @@ export class WebRTCTransport implements Transport {
             return
         }
 
+        console.info(`[WebRTC]: Negotiation needed, creating local description...`)
         await this.peer.setLocalDescription()
         const localDescription = this.peer.localDescription
         if (!localDescription) {
+            console.error(`[WebRTC]: Failed to set local description in OnNegotiationNeeded`)
             this.logger?.debug("Failed to set local description in OnNegotiationNeeded")
             return
         }
 
+        console.info(`[WebRTC]: Sending local description (${localDescription.type})`)
         this.logger?.debug(`OnNegotiationNeeded: Sending local description: ${localDescription.type}`)
         this.sendMessage({
             Description: {
@@ -106,20 +111,35 @@ export class WebRTCTransport implements Transport {
 
         this.remoteDescription = sdp
         if (!this.peer) {
+            console.warn(`[WebRTC]: Cannot handle remote description - no peer connection`)
             return
         }
 
         if (this.remoteDescription) {
-            await this.peer.setRemoteDescription(this.remoteDescription)
+            try {
+                console.info(`[WebRTC]: Setting remote description (${this.remoteDescription.type})`)
+                await this.peer.setRemoteDescription(this.remoteDescription)
+                console.info(`[WebRTC]: Remote description set successfully`)
+            } catch (err) {
+                console.error(`[WebRTC]: Failed to set remote description:`, err)
+                return
+            }
 
             if (this.remoteDescription.type == "offer") {
-                await this.peer.setLocalDescription()
+                try {
+                    await this.peer.setLocalDescription()
+                } catch (err) {
+                    console.error(`[WebRTC]: Failed to create answer:`, err)
+                    return
+                }
                 const localDescription = this.peer.localDescription
                 if (!localDescription) {
+                    console.error(`[WebRTC]: Peer didn't have a localDescription whilst receiving an offer and trying to answer`)
                     this.logger?.debug("Peer didn't have a localDescription whilst receiving an offer and trying to answer")
                     return
                 }
 
+                console.info(`[WebRTC]: Sending answer`)
                 this.logger?.debug(`Responding to offer description: ${localDescription.type}`)
                 this.sendMessage({
                     Description: {
@@ -193,6 +213,8 @@ export class WebRTCTransport implements Transport {
             this.setDelayHintInterval(false)
         }
 
+        // Always log connection state changes to console for debugging
+        console.info(`[WebRTC]: Connection state: ${this.peer.connectionState}, ICE gathering: ${this.peer.iceGatheringState}`)
         this.logger?.debug(`Changing Peer State to ${this.peer.connectionState}`, {
             type: type ?? undefined
         })
@@ -202,6 +224,8 @@ export class WebRTCTransport implements Transport {
             this.logger?.debug("OnIceConnectionStateChange without a peer")
             return
         }
+        // Always log ICE state changes to console for debugging
+        console.info(`[WebRTC]: ICE connection state: ${this.peer.iceConnectionState}`)
         this.logger?.debug(`Changing Peer Ice State to ${this.peer.iceConnectionState}`)
     }
     private onIceGatheringStateChange() {
@@ -277,6 +301,8 @@ export class WebRTCTransport implements Transport {
     private onTrack(event: RTCTrackEvent) {
         const track = event.track
 
+        console.info(`[WebRTC]: Received track: kind=${track.kind}, id=${track.id}, label=${track.label}`)
+
         if (track.kind == "video") {
             this.videoReceiver = event.receiver
         }
@@ -288,12 +314,14 @@ export class WebRTCTransport implements Transport {
                 track.contentHint = "motion"
             }
 
+            console.info(`[WebRTC]: Video track received and configured`)
             this.videoTrackHolder.track = track
             if (!this.videoTrackHolder.ontrack) {
                 throw "No video track listener registered!"
             }
             this.videoTrackHolder.ontrack()
         } else if (track.kind == "audio") {
+            console.info(`[WebRTC]: Audio track received`)
             this.audioTrackHolder.track = track
             if (!this.audioTrackHolder.ontrack) {
                 throw "No audio track listener registered!"
