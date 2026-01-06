@@ -241,7 +241,7 @@ class ViewerApp implements Component {
         this.stream.addInfoListener(this.onInfo.bind(this))
 
         // In hybrid mode, don't show the connection modal - Android has its own loading UI
-        if (!hybridMode) {
+        if (!this.hybridMode) {
             // Create connection info modal
             const connectionInfo = new ConnectionInfoModal()
             this.stream.addInfoListener(connectionInfo.onInfo.bind(connectionInfo))
