@@ -756,9 +756,14 @@ body.hybrid-mode {
 body.hybrid-mode #modal-overlay,
 body.hybrid-mode #sidebar-root,
 body.hybrid-mode #error-list,
-body.hybrid-mode #input,
-body.hybrid-mode .video-stats {
+body.hybrid-mode #input {
     display: none !important;
+}
+
+/* Stats overlay - allow it to be shown via MoonlightBridge API in hybrid mode */
+body.hybrid-mode .video-stats {
+    /* Don't hide - controlled by JS toggle */
+    z-index: 10000 !important;
 }
 
 body.hybrid-mode #root {
