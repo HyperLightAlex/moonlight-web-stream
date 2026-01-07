@@ -45,6 +45,10 @@ interface MoonlightBridgeAPI {
     requestPointerLock: () => Promise<boolean>;
     exitPointerLock: () => void;
     isPointerLocked: () => boolean;
+    
+    // Stats overlay
+    toggleStats: () => void;
+    isStatsVisible: () => boolean;
 }
 
 async function startApp() {
@@ -161,6 +165,18 @@ async function startApp() {
             },
             isPointerLocked: () => {
                 return !!document.pointerLockElement
+            },
+            
+            // Stats overlay
+            toggleStats: () => {
+                const stats = app.getStream()?.getStats()
+                if (stats) {
+                    stats.toggle()
+                    console.info(`[MoonlightBridge] Stats toggled, now ${stats.isEnabled() ? 'visible' : 'hidden'}`)
+                }
+            },
+            isStatsVisible: () => {
+                return app.getStream()?.getStats()?.isEnabled() ?? false
             }
         }
         
