@@ -221,6 +221,10 @@ class ViewerApp implements Component {
         this.sidebar = new ViewerSidebar(this)
         if (!hybridMode) {
             setSidebar(this.sidebar)
+        } else {
+            // In hybrid mode, we still need the screen keyboard's hidden input in the DOM
+            // so it can receive focus when showKeyboard() is called via MoonlightBridge
+            document.body.appendChild(this.sidebar.getScreenKeyboard().getHiddenElement())
         }
 
         // Configure stats element
