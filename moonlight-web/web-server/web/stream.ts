@@ -5,7 +5,7 @@ import { showErrorPopup } from "./component/error.js";
 import { getStreamerSize, InfoEvent, Stream } from "./stream/index.js"
 import { getModalBackground, Modal, showMessage, showModal } from "./component/modal/index.js";
 import { getSidebarRoot, setSidebar, setSidebarExtended, setSidebarStyle, Sidebar } from "./component/sidebar/index.js";
-import { defaultStreamInputConfig, MouseMode, ScreenKeyboardSetVisibleEvent, StreamInputConfig } from "./stream/input.js";
+import { defaultStreamInputConfig, MouseMode, ScreenKeyboardSetVisibleEvent, StreamInputConfig, TouchMode } from "./stream/input.js";
 import { defaultStreamSettings, getLocalStreamSettings, StreamSettings } from "./component/settings_menu.js";
 import { SelectComponent } from "./component/input.js";
 import { emptyVideoFormats, getStandardVideoFormats, getSupportedVideoFormats, hasAnyCodec } from "./stream/video.js";
@@ -13,6 +13,39 @@ import { StreamCapabilities, StreamKeys } from "./api_bindings.js";
 import { ScreenKeyboard, TextEvent } from "./screen_keyboard.js";
 import { FormModal } from "./component/modal/form.js";
 import { streamStatsToText } from "./stream/stats.js";
+
+// MoonlightBridge API for hybrid mode Android client
+declare global {
+    interface Window {
+        MoonlightBridge?: MoonlightBridgeAPI;
+    }
+}
+
+interface MoonlightBridgeAPI {
+    // Touch/Mouse settings
+    getTouchMode: () => TouchMode;
+    setTouchMode: (mode: TouchMode) => void;
+    getMouseMode: () => MouseMode;
+    setMouseMode: (mode: MouseMode) => void;
+    getScrollMode: () => "highres" | "normal";
+    setScrollMode: (mode: "highres" | "normal") => void;
+    
+    // Touch capabilities
+    isTouchSupported: () => boolean;
+    
+    // Screen keyboard
+    showKeyboard: () => void;
+    hideKeyboard: () => void;
+    isKeyboardVisible: () => boolean;
+    
+    // Stream info
+    getStreamInfo: () => { width: number; height: number; fps: number; codec: string } | null;
+    
+    // Pointer lock (for FPS games)
+    requestPointerLock: () => Promise<boolean>;
+    exitPointerLock: () => void;
+    isPointerLocked: () => boolean;
+}
 
 async function startApp() {
     const api = await getApi()
@@ -57,6 +90,82 @@ async function startApp() {
     // Start and Mount App
     const app = new ViewerApp(api, hostId, appId, hybridMode)
     app.mount(rootElement)
+
+    // Initialize MoonlightBridge API for hybrid mode
+    if (hybridMode) {
+        window.MoonlightBridge = {
+            // Touch/Mouse settings
+            getTouchMode: () => app.getInputConfig().touchMode,
+            setTouchMode: (mode) => {
+                const config = app.getInputConfig()
+                config.touchMode = mode
+                app.setInputConfig(config)
+                console.info(`[MoonlightBridge] Touch mode set to: ${mode}`)
+            },
+            getMouseMode: () => app.getInputConfig().mouseMode,
+            setMouseMode: (mode) => {
+                const config = app.getInputConfig()
+                config.mouseMode = mode
+                app.setInputConfig(config)
+                console.info(`[MoonlightBridge] Mouse mode set to: ${mode}`)
+            },
+            getScrollMode: () => app.getInputConfig().mouseScrollMode,
+            setScrollMode: (mode) => {
+                const config = app.getInputConfig()
+                config.mouseScrollMode = mode
+                app.setInputConfig(config)
+                console.info(`[MoonlightBridge] Scroll mode set to: ${mode}`)
+            },
+            
+            // Touch capabilities
+            isTouchSupported: () => {
+                const stream = app.getStream()
+                return stream?.getCapabilities()?.touch ?? false
+            },
+            
+            // Screen keyboard
+            showKeyboard: () => {
+                app.getSidebar()?.getScreenKeyboard()?.show()
+            },
+            hideKeyboard: () => {
+                app.getSidebar()?.getScreenKeyboard()?.hide()
+            },
+            isKeyboardVisible: () => {
+                return app.getSidebar()?.getScreenKeyboard()?.isVisible() ?? false
+            },
+            
+            // Stream info
+            getStreamInfo: () => {
+                const stream = app.getStream()
+                if (!stream) return null
+                const settings = app.getSettings()
+                return {
+                    width: settings.videoSizeCustom.width,
+                    height: settings.videoSizeCustom.height,
+                    fps: settings.fps,
+                    codec: settings.videoCodec
+                }
+            },
+            
+            // Pointer lock
+            requestPointerLock: async () => {
+                try {
+                    await app.requestPointerLock()
+                    return true
+                } catch {
+                    return false
+                }
+            },
+            exitPointerLock: () => {
+                app.exitPointerLock()
+            },
+            isPointerLocked: () => {
+                return !!document.pointerLockElement
+            }
+        }
+        
+        console.info("[MoonlightBridge] API initialized for hybrid mode")
+    }
 }
 
 // Prevent starting transition
@@ -128,26 +237,30 @@ class ViewerApp implements Component {
 
         this.settings = settings
 
-        // Configure input (skip in hybrid mode - native client handles it)
-        if (!hybridMode) {
-            this.addListeners(document)
-            this.addListeners(document.getElementById("input") as HTMLDivElement)
-        }
+        // Enable touch/mouse/keyboard listeners for ALL modes
+        // Touch input goes through WebView in hybrid mode
+        this.addListeners(document)
+        this.addListeners(document.getElementById("input") as HTMLDivElement)
 
-        // Skip input-related event listeners in hybrid mode
-        if (!hybridMode) {
-            window.addEventListener("blur", () => {
+        // Visibility change handlers (always needed)
+        window.addEventListener("blur", () => {
+            this.stream?.getInput().raiseAllKeys()
+        })
+        document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState !== "visible") {
                 this.stream?.getInput().raiseAllKeys()
-            })
-            document.addEventListener("visibilitychange", () => {
-                if (document.visibilityState !== "visible") {
-                    this.stream?.getInput().raiseAllKeys()
-                }
-            })
+            }
+        })
 
-            document.addEventListener("pointerlockchange", this.onPointerLockChange.bind(this))
-            document.addEventListener("fullscreenchange", this.onFullscreenChange.bind(this))
+        document.addEventListener("pointerlockchange", this.onPointerLockChange.bind(this))
+        document.addEventListener("fullscreenchange", this.onFullscreenChange.bind(this))
 
+        // Start touch update loop (needed for touch-to-mouse in hybrid mode)
+        window.requestAnimationFrame(this.onTouchUpdate.bind(this))
+
+        // ONLY enable gamepad listeners in non-hybrid mode
+        // In hybrid mode, gamepad input comes through native WebRTC data channels
+        if (!hybridMode) {
             window.addEventListener("gamepadconnected", this.onGamepadConnect.bind(this))
             window.addEventListener("gamepaddisconnected", this.onGamepadDisconnect.bind(this))
             // Connect all gamepads
@@ -156,6 +269,8 @@ class ViewerApp implements Component {
                     this.onGamepadAdd(gamepad)
                 }
             }
+            // Gamepad update loop only in non-hybrid mode
+            window.requestAnimationFrame(this.onGamepadUpdate.bind(this))
         }
     }
     private addListeners(element: GlobalEventHandlers) {
@@ -250,10 +365,6 @@ class ViewerApp implements Component {
             // In hybrid mode, hide all UI elements and only show video
             document.body.classList.add("hybrid-mode")
         }
-
-        // Start animation frame loop
-        this.onTouchUpdate()
-        this.onGamepadUpdate()
 
         this.stream.getInput().addScreenKeyboardVisibleEvent(this.onScreenKeyboardSetVisible.bind(this))
 
@@ -589,6 +700,14 @@ class ViewerApp implements Component {
     }
     getStream(): Stream | null {
         return this.stream
+    }
+
+    getSidebar(): ViewerSidebar {
+        return this.sidebar
+    }
+
+    getSettings(): StreamSettings {
+        return this.settings
     }
 }
 

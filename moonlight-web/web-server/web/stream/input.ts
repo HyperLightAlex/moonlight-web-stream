@@ -35,11 +35,12 @@ function trySendChannel(channel: DataTransportChannel | null, buffer: ByteBuffer
 
 export type MouseScrollMode = "highres" | "normal"
 export type MouseMode = "relative" | "follow" | "pointAndDrag"
+export type TouchMode = "touch" | "mouseRelative" | "pointAndDrag"
 
 export type StreamInputConfig = {
     mouseMode: MouseMode
     mouseScrollMode: MouseScrollMode
-    touchMode: "touch" | "mouseRelative" | "pointAndDrag"
+    touchMode: TouchMode
     controllerConfig: ControllerConfig
 }
 

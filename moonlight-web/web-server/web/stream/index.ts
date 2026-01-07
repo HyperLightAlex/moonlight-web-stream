@@ -73,6 +73,7 @@ export class Stream implements Component {
 
     private videoRenderer: VideoRenderer | null = null
     private audioPlayer: AudioPlayer | null = null
+    private capabilities: StreamCapabilities | null = null
 
     private input: StreamInput
     private stats: StreamStats
@@ -231,6 +232,7 @@ export class Stream implements Component {
             this.eventTarget.dispatchEvent(event)
         } else if ("ConnectionComplete" in message) {
             const capabilities = message.ConnectionComplete.capabilities
+            this.capabilities = capabilities  // Store capabilities for MoonlightBridge API
             const formatRaw = message.ConnectionComplete.format
             const width = message.ConnectionComplete.width
             const height = message.ConnectionComplete.height
@@ -548,6 +550,10 @@ export class Stream implements Component {
 
     isHybridMode(): boolean {
         return this.hybridMode
+    }
+
+    getCapabilities(): StreamCapabilities | null {
+        return this.capabilities
     }
 }
 
