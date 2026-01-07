@@ -49,6 +49,10 @@ interface MoonlightBridgeAPI {
     // Stats overlay
     toggleStats: () => void;
     isStatsVisible: () => boolean;
+    
+    // Text/Key input (for native soft keyboard)
+    sendText: (text: string) => void;
+    sendKey: (isDown: boolean, keyCode: number, modifiers: number) => void;
 }
 
 async function startApp() {
@@ -177,6 +181,22 @@ async function startApp() {
             },
             isStatsVisible: () => {
                 return app.getStream()?.getStats()?.isEnabled() ?? false
+            },
+            
+            // Text/Key input (for native soft keyboard)
+            sendText: (text: string) => {
+                const input = app.getStream()?.getInput()
+                if (input && text) {
+                    input.sendText(text)
+                    console.info(`[MoonlightBridge] Sent text: "${text}"`)
+                }
+            },
+            sendKey: (isDown: boolean, keyCode: number, modifiers: number = 0) => {
+                const input = app.getStream()?.getInput()
+                if (input) {
+                    input.sendKey(isDown, keyCode, modifiers)
+                    console.info(`[MoonlightBridge] Sent key: ${isDown ? 'down' : 'up'}, code=${keyCode}, mods=${modifiers}`)
+                }
             }
         }
         
