@@ -101,6 +101,51 @@ async function startApp() {
 
     // Initialize MoonlightBridge API for hybrid mode
     if (hybridMode) {
+        // Create a hidden input for soft keyboard that won't affect layout
+        const keyboardInput = document.createElement("input")
+        keyboardInput.type = "text"
+        keyboardInput.autocomplete = "off"
+        keyboardInput.autocapitalize = "off"
+        keyboardInput.spellcheck = false
+        keyboardInput.style.cssText = `
+            position: fixed !important;
+            left: -9999px !important;
+            top: 50% !important;
+            width: 1px !important;
+            height: 1px !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+            z-index: -1 !important;
+        `
+        document.body.appendChild(keyboardInput)
+        
+        let keyboardVisible = false
+        
+        // Handle text input from the hidden input
+        keyboardInput.addEventListener("input", (event) => {
+            if (event instanceof InputEvent && event.data) {
+                app.getStream()?.getInput().sendText(event.data)
+                console.info(`[MoonlightBridge] Keyboard input: "${event.data}"`)
+            }
+            // Clear the input after sending
+            keyboardInput.value = ""
+        })
+        
+        // Handle special keys
+        keyboardInput.addEventListener("keydown", (event) => {
+            // Let the existing input handler process it
+            app.getStream()?.getInput().onKeyDown(event)
+        })
+        keyboardInput.addEventListener("keyup", (event) => {
+            app.getStream()?.getInput().onKeyUp(event)
+        })
+        
+        // Track blur to update visibility state
+        keyboardInput.addEventListener("blur", () => {
+            keyboardVisible = false
+            console.info("[MoonlightBridge] Keyboard hidden (blur)")
+        })
+        
         window.MoonlightBridge = {
             // Touch/Mouse settings
             getTouchMode: () => app.getInputConfig().touchMode,
@@ -131,15 +176,21 @@ async function startApp() {
                 return stream?.getCapabilities()?.touch ?? false
             },
             
-            // Screen keyboard
+            // Screen keyboard (uses hybrid-mode hidden input)
             showKeyboard: () => {
-                app.getSidebar()?.getScreenKeyboard()?.show()
+                keyboardInput.style.pointerEvents = "auto"
+                keyboardInput.focus()
+                keyboardVisible = true
+                console.info("[MoonlightBridge] Keyboard shown (focus)")
             },
             hideKeyboard: () => {
-                app.getSidebar()?.getScreenKeyboard()?.hide()
+                keyboardInput.blur()
+                keyboardInput.style.pointerEvents = "none"
+                keyboardVisible = false
+                console.info("[MoonlightBridge] Keyboard hidden")
             },
             isKeyboardVisible: () => {
-                return app.getSidebar()?.getScreenKeyboard()?.isVisible() ?? false
+                return keyboardVisible
             },
             
             // Stream info
