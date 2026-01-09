@@ -599,16 +599,84 @@ export class Stream implements Component {
         // Bitrate (not directly available, use -1)
         const bitrateMbps = -1
         
-        // Calculate quality
-        let quality: "good" | "fair" | "poor" = "poor"
-        const effectiveLatency = totalLatencyMs > 0 ? totalLatencyMs : 0
-        const effectiveLoss = packetLossPercent > 0 ? packetLossPercent : 0
-        const effectiveFps = currentFps > 0 ? currentFps : targetFps
+        // Calculate quality using weighted scoring (same logic as stats overlay)
+        type QualityLevel = "good" | "warn" | "bad"
         
-        if (effectiveLatency < 50 && effectiveLoss < 0.5 && effectiveFps >= targetFps - 5) {
+        // Helper functions for individual metric quality
+        const getRttQuality = (ms: number): QualityLevel => {
+            if (ms <= 0) return "good"  // No data = assume good
+            if (ms < 50) return "good"
+            if (ms < 100) return "warn"
+            return "bad"
+        }
+        
+        const getLatencyQuality = (ms: number): QualityLevel => {
+            if (ms <= 0) return "good"  // No data = assume good
+            if (ms < 20) return "good"
+            if (ms < 50) return "warn"
+            return "bad"
+        }
+        
+        const getFpsQuality = (current: number, target: number): QualityLevel => {
+            if (current <= 0) return "good"  // No data = assume good
+            const diff = target - current
+            if (diff <= 5) return "good"
+            if (diff <= 15) return "warn"
+            return "bad"
+        }
+        
+        const getPacketLossQuality = (percent: number): QualityLevel => {
+            if (percent <= 0) return "good"
+            if (percent < 0.5) return "good"
+            if (percent < 2) return "warn"
+            return "bad"
+        }
+        
+        const getJitterQuality = (ms: number): QualityLevel => {
+            if (ms <= 0) return "good"  // No data = assume good
+            if (ms < 10) return "good"
+            if (ms < 30) return "warn"
+            return "bad"
+        }
+        
+        // Calculate individual qualities
+        const rttQuality = getRttQuality(networkRttMs)
+        const hostLatQuality = getLatencyQuality(hostLatencyMs)
+        const streamerLatQuality = getLatencyQuality(streamerLatencyMs)
+        const decodeLatQuality = getLatencyQuality(decodeLatencyMs)
+        const fpsQuality = getFpsQuality(currentFps, targetFps)
+        const lossQuality = getPacketLossQuality(packetLossPercent)
+        const jitterQuality = getJitterQuality(jitterMs)
+        
+        // Weighted scoring: higher weight = more important to stream quality
+        const weights: { quality: QualityLevel, weight: number }[] = [
+            { quality: lossQuality, weight: 3 },        // Packet loss is critical
+            { quality: fpsQuality, weight: 2 },         // FPS drops are noticeable
+            { quality: rttQuality, weight: 2 },         // RTT affects responsiveness
+            { quality: jitterQuality, weight: 2 },      // Jitter causes stuttering
+            { quality: hostLatQuality, weight: 1 },     // Host latency informational
+            { quality: streamerLatQuality, weight: 1 }, // Streamer latency informational
+            { quality: decodeLatQuality, weight: 1 },   // Decode latency informational
+        ]
+        
+        let totalScore = 0
+        let totalWeight = 0
+        for (const { quality: q, weight } of weights) {
+            const score = q === "good" ? 0 : q === "warn" ? 1 : 2
+            totalScore += score * weight
+            totalWeight += weight
+        }
+        
+        const normalizedScore = totalScore / totalWeight
+        
+        // Map to quality: <0.5 = good, <1.2 = fair, >=1.2 = poor
+        let quality: "good" | "fair" | "poor"
+        if (normalizedScore < 0.5) {
             quality = "good"
-        } else if (effectiveLatency < 100 && effectiveLoss < 2 && effectiveFps >= targetFps - 15) {
+        } else if (normalizedScore < 1.2) {
             quality = "fair"
+        } else {
+            quality = "poor"
         }
         
         return {

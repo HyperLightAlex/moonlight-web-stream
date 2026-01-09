@@ -320,7 +320,8 @@ export class StreamStats {
 
     private logger: Logger | null = null
 
-    private enabled: boolean = false
+    private enabled: boolean = false  // Controls overlay visibility
+    private collecting: boolean = false  // Controls data collection (always on when transport set)
     private transport: Transport | null = null
     private statsChannel: DataTransportChannel | null = null
     private updateIntervalId: number | null = null
@@ -351,39 +352,35 @@ export class StreamStats {
     setTransport(transport: Transport) {
         this.transport = transport
 
-        this.checkEnabled()
+        // Always start collecting when transport is set (for getStreamHealth API)
+        this.startCollecting()
     }
-    private checkEnabled() {
-        if (this.enabled) {
-            if (this.statsChannel) {
-                this.statsChannel.removeReceiveListener(this.onRawData.bind(this))
-                this.statsChannel = null
-            }
 
-            if (!this.statsChannel && this.transport) {
-                const channel = this.transport.getChannel(TransportChannelId.STATS)
-                if (channel.type != "data") {
-                    this.logger?.debug(`Failed initialize debug transport channel because type is "${channel.type}" and not "data"`)
-                    return
-                }
+    // Start collecting stats (separate from display)
+    private startCollecting() {
+        if (this.collecting) return
+        this.collecting = true
+
+        // Set up stats channel for server-side latency data
+        if (!this.statsChannel && this.transport) {
+            const channel = this.transport.getChannel(TransportChannelId.STATS)
+            if (channel.type != "data") {
+                this.logger?.debug(`Failed initialize debug transport channel because type is "${channel.type}" and not "data"`)
+            } else {
                 channel.addReceiveListener(this.onRawData.bind(this))
                 this.statsChannel = channel
             }
-            if (this.updateIntervalId == null) {
-                this.updateIntervalId = setInterval(this.updateLocalStats.bind(this), 1000)
-            }
-        } else {
-            if (this.updateIntervalId != null) {
-                clearInterval(this.updateIntervalId)
-                this.updateIntervalId = null
-            }
+        }
+
+        // Start interval for WebRTC transport stats
+        if (this.updateIntervalId == null) {
+            this.updateIntervalId = setInterval(this.updateLocalStats.bind(this), 1000)
         }
     }
 
     setEnabled(enabled: boolean) {
         this.enabled = enabled
-
-        this.checkEnabled()
+        // Note: collection continues regardless of enabled state
     }
     isEnabled(): boolean {
         return this.enabled
