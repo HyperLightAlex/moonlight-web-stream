@@ -116,12 +116,12 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
     // Calculate overall quality using weighted scoring
     // Weights: higher = more important to stream quality
     const weights: { quality: QualityLevel, weight: number }[] = [
-        { quality: packetLossQuality, weight: 3 },    // Packet loss is critical
-        { quality: fpsQuality, weight: 2 },           // FPS drops are noticeable
-        { quality: rttQuality, weight: 2 },           // RTT affects responsiveness
+        { quality: packetLossQuality, weight: 3 },    // Packet loss is critical - causes artifacts
+        { quality: fpsQuality, weight: 2 },           // FPS drops are very noticeable
+        { quality: rttQuality, weight: 2 },           // RTT affects input responsiveness
+        { quality: jitterQuality, weight: 2 },        // Jitter causes stuttering, buffer bloat
         { quality: hostLatencyQuality, weight: 1 },   // Host latency is informational
         { quality: streamerLatencyQuality, weight: 1 }, // Streamer latency is informational
-        { quality: jitterQuality, weight: 1 },        // Jitter is less critical
     ]
     
     // Calculate weighted score: good=0, warn=1, bad=2
