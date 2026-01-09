@@ -45,9 +45,9 @@ function getRttQuality(ms: number | null): QualityLevel {
 function getFpsQuality(current: number | null, target: number | null): QualityLevel {
     if (current == null || target == null) return "good"
     const diff = target - current
-    if (diff <= 2) return "good"
-    if (diff <= 10) return "warn"
-    return "bad"
+    if (diff <= 5) return "good"      // Up to 5fps drop is fine
+    if (diff <= 15) return "warn"     // 6-15fps drop is noticeable
+    return "bad"                       // >15fps drop is significant
 }
 
 function getPacketLossQuality(lost: number, received: number): QualityLevel {
@@ -113,11 +113,38 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
     const jitterMs = statsData.transport.webrtcJitterMs ? parseFloat(statsData.transport.webrtcJitterMs) * 1000 : null
     const jitterQuality: QualityLevel = jitterMs != null && jitterMs > 30 ? "bad" : jitterMs != null && jitterMs > 10 ? "warn" : "good"
     
-    // Calculate overall quality
-    const qualities = [rttQuality, hostLatencyQuality, streamerLatencyQuality, fpsQuality, packetLossQuality, jitterQuality]
-    const hasBad = qualities.indexOf("bad") !== -1
-    const hasWarn = qualities.indexOf("warn") !== -1
-    const overallQuality: QualityLevel = hasBad ? "bad" : hasWarn ? "warn" : "good"
+    // Calculate overall quality using weighted scoring
+    // Weights: higher = more important to stream quality
+    const weights: { quality: QualityLevel, weight: number }[] = [
+        { quality: packetLossQuality, weight: 3 },    // Packet loss is critical
+        { quality: fpsQuality, weight: 2 },           // FPS drops are noticeable
+        { quality: rttQuality, weight: 2 },           // RTT affects responsiveness
+        { quality: hostLatencyQuality, weight: 1 },   // Host latency is informational
+        { quality: streamerLatencyQuality, weight: 1 }, // Streamer latency is informational
+        { quality: jitterQuality, weight: 1 },        // Jitter is less critical
+    ]
+    
+    // Calculate weighted score: good=0, warn=1, bad=2
+    let totalScore = 0
+    let totalWeight = 0
+    for (const { quality, weight } of weights) {
+        const score = quality === "good" ? 0 : quality === "warn" ? 1 : 2
+        totalScore += score * weight
+        totalWeight += weight
+    }
+    
+    // Normalize to 0-2 range
+    const normalizedScore = totalScore / totalWeight
+    
+    // Map to quality: <0.5 = good, <1.2 = fair, >=1.2 = poor
+    let overallQuality: QualityLevel
+    if (normalizedScore < 0.5) {
+        overallQuality = "good"
+    } else if (normalizedScore < 1.2) {
+        overallQuality = "warn"
+    } else {
+        overallQuality = "bad"
+    }
     const overallLabel = overallQuality === "good" ? "Good" : overallQuality === "warn" ? "Fair" : "Poor"
     
     // Collect issues when quality is not good
