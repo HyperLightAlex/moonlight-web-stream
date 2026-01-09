@@ -759,6 +759,64 @@ canvas.video-stream {
     background: rgba(248, 113, 113, 0.15);
 }
 
+/* Issues section */
+.stats-issues {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.stats-issue {
+    margin-bottom: 8px;
+    padding: 8px;
+    border-radius: 6px;
+    border-left: 3px solid;
+}
+
+.stats-issue.stats-bad {
+    background: rgba(248, 113, 113, 0.1);
+    border-left-color: #f87171;
+}
+
+.stats-issue.stats-warn {
+    background: rgba(251, 191, 36, 0.1);
+    border-left-color: #fbbf24;
+}
+
+.stats-issue:last-child {
+    margin-bottom: 0;
+}
+
+.stats-issue-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+}
+
+.stats-issue-metric {
+    font-weight: 600;
+    color: #fff;
+}
+
+.stats-issue-value {
+    font-weight: 500;
+}
+
+.stats-issue.stats-bad .stats-issue-value {
+    color: #f87171;
+}
+
+.stats-issue.stats-warn .stats-issue-value {
+    color: #fbbf24;
+}
+
+.stats-issue-suggestion {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.6);
+    line-height: 1.4;
+}
+
 .sidebar-stream {
     display: flex;
     flex-direction: column;

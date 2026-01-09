@@ -90,6 +90,13 @@ streamer latency: ${formatMs(statsData.avgStreamerProcessingTimeMs)}
     return text
 }
 
+type QualityIssue = {
+    metric: string
+    value: string
+    severity: QualityLevel
+    suggestion: string
+}
+
 export function streamStatsToHtml(statsData: StreamStatsData): string {
     const rttQuality = getRttQuality(statsData.streamerRttMs)
     const hostLatencyQuality = getLatencyQuality(statsData.avgHostProcessingLatencyMs)
@@ -104,14 +111,104 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
     const packetLossPercent = packetsReceived > 0 ? ((packetsLost / (packetsLost + packetsReceived)) * 100) : 0
     
     const jitterMs = statsData.transport.webrtcJitterMs ? parseFloat(statsData.transport.webrtcJitterMs) * 1000 : null
-    const jitterQuality = jitterMs != null && jitterMs > 10 ? "warn" : "good"
+    const jitterQuality: QualityLevel = jitterMs != null && jitterMs > 30 ? "bad" : jitterMs != null && jitterMs > 10 ? "warn" : "good"
     
     // Calculate overall quality
-    const qualities = [rttQuality, hostLatencyQuality, streamerLatencyQuality, fpsQuality, packetLossQuality]
+    const qualities = [rttQuality, hostLatencyQuality, streamerLatencyQuality, fpsQuality, packetLossQuality, jitterQuality]
     const hasBad = qualities.indexOf("bad") !== -1
     const hasWarn = qualities.indexOf("warn") !== -1
     const overallQuality: QualityLevel = hasBad ? "bad" : hasWarn ? "warn" : "good"
     const overallLabel = overallQuality === "good" ? "Good" : overallQuality === "warn" ? "Fair" : "Poor"
+    
+    // Collect issues when quality is not good
+    const issues: QualityIssue[] = []
+    
+    if (rttQuality !== "good" && statsData.streamerRttMs != null) {
+        issues.push({
+            metric: "Network RTT",
+            value: formatMs(statsData.streamerRttMs),
+            severity: rttQuality,
+            suggestion: rttQuality === "bad" 
+                ? "High latency - check network connection or try wired ethernet"
+                : "Moderate latency - streaming over WiFi or internet?"
+        })
+    }
+    
+    if (hostLatencyQuality !== "good" && statsData.avgHostProcessingLatencyMs != null) {
+        issues.push({
+            metric: "Host Encode",
+            value: formatMs(statsData.avgHostProcessingLatencyMs),
+            severity: hostLatencyQuality,
+            suggestion: hostLatencyQuality === "bad"
+                ? "Host PC struggling to encode - lower resolution or check GPU load"
+                : "Host encode time elevated - consider closing other GPU apps"
+        })
+    }
+    
+    if (streamerLatencyQuality !== "good" && statsData.avgStreamerProcessingTimeMs != null) {
+        issues.push({
+            metric: "Streamer",
+            value: formatMs(statsData.avgStreamerProcessingTimeMs),
+            severity: streamerLatencyQuality,
+            suggestion: "Streamer processing delayed - server may be under load"
+        })
+    }
+    
+    if (fpsQuality !== "good" && webrtcFps != null && statsData.videoFps != null) {
+        const fpsDrop = statsData.videoFps - webrtcFps
+        issues.push({
+            metric: "FPS Drop",
+            value: `${fpsDrop.toFixed(0)} fps below target`,
+            severity: fpsQuality,
+            suggestion: fpsQuality === "bad"
+                ? "Significant frame drops - network congestion or decoder overload"
+                : "Minor frame drops - may improve with better connection"
+        })
+    }
+    
+    if (packetLossQuality !== "good") {
+        issues.push({
+            metric: "Packet Loss",
+            value: `${packetLossPercent.toFixed(2)}%`,
+            severity: packetLossQuality,
+            suggestion: packetLossQuality === "bad"
+                ? "High packet loss - unstable network, try wired connection"
+                : "Some packet loss - WiFi interference or network congestion"
+        })
+    }
+    
+    if (jitterQuality !== "good" && jitterMs != null) {
+        issues.push({
+            metric: "Jitter",
+            value: formatMs(jitterMs),
+            severity: jitterQuality,
+            suggestion: "Network timing inconsistent - other devices using bandwidth?"
+        })
+    }
+    
+    // Sort issues by severity (bad first, then warn)
+    issues.sort((a, b) => {
+        if (a.severity === "bad" && b.severity !== "bad") return -1
+        if (a.severity !== "bad" && b.severity === "bad") return 1
+        return 0
+    })
+    
+    // Build issues HTML
+    let issuesHtml = ""
+    if (issues.length > 0) {
+        issuesHtml = `
+    <div class="stats-section stats-issues">
+        <div class="stats-section-title">⚠️ Issues Detected</div>
+        ${issues.map(issue => `
+        <div class="stats-issue ${qualityClass(issue.severity)}">
+            <div class="stats-issue-header">
+                <span class="stats-issue-metric">${issue.metric}</span>
+                <span class="stats-issue-value">${issue.value}</span>
+            </div>
+            <div class="stats-issue-suggestion">${issue.suggestion}</div>
+        </div>`).join("")}
+    </div>`
+    }
     
     return `
 <div class="stats-panel">
@@ -163,6 +260,7 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
             <span class="stats-value ${qualityClass(jitterQuality)}">${jitterMs != null ? formatMs(jitterMs) : "-"}</span>
         </div>
     </div>
+${issuesHtml}
 </div>`
 }
 
