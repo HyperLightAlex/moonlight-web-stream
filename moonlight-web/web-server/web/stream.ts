@@ -22,7 +22,7 @@ declare global {
 }
 
 // API version - increment when making changes to help debug deployments
-const MOONLIGHT_BRIDGE_VERSION = "1.2.0"  // Added total latency display
+const MOONLIGHT_BRIDGE_VERSION = "1.3.0"  // Added jitter buffer delay to total latency
 
 interface MoonlightBridgeAPI {
     // Version - check with MoonlightBridge.version

@@ -574,12 +574,17 @@ export class Stream implements Component {
         // Decode latency from WebRTC stats (avg decode time, already in ms)
         const decodeLatencyMs = stats.transport.webrtcAvgDecodeTimeMs ? parseFloat(stats.transport.webrtcAvgDecodeTimeMs) : -1
         
+        // Jitter buffer delay from WebRTC stats (avg buffer time, already in ms)
+        const jitterBufferDelayMs = stats.transport.webrtcAvgJitterBufferDelayMs ? parseFloat(stats.transport.webrtcAvgJitterBufferDelayMs) : -1
+        
         // Calculate total latency (sum of available components)
+        // Total = network + encode + streamer + jitter buffer + decode
         let totalLatencyMs = 0
         let hasLatencyData = false
-        if (hostLatencyMs > 0) { totalLatencyMs += hostLatencyMs; hasLatencyData = true }
         if (networkLatencyMs > 0) { totalLatencyMs += networkLatencyMs; hasLatencyData = true }
+        if (hostLatencyMs > 0) { totalLatencyMs += hostLatencyMs; hasLatencyData = true }
         if (streamerLatencyMs > 0) { totalLatencyMs += streamerLatencyMs; hasLatencyData = true }
+        if (jitterBufferDelayMs > 0) { totalLatencyMs += jitterBufferDelayMs; hasLatencyData = true }
         if (decodeLatencyMs > 0) { totalLatencyMs += decodeLatencyMs; hasLatencyData = true }
         if (!hasLatencyData) totalLatencyMs = -1
         
@@ -685,6 +690,7 @@ export class Stream implements Component {
             hostLatencyMs: Math.round(hostLatencyMs * 100) / 100,
             networkLatencyMs: Math.round(networkLatencyMs * 100) / 100,
             streamerLatencyMs: Math.round(streamerLatencyMs * 100) / 100,
+            jitterBufferDelayMs: Math.round(jitterBufferDelayMs * 100) / 100,
             decodeLatencyMs: Math.round(decodeLatencyMs * 100) / 100,
             networkRttMs: Math.round(networkRttMs * 100) / 100,
             packetLossPercent: Math.round(packetLossPercent * 1000) / 1000,
@@ -704,6 +710,7 @@ export type StreamHealthData = {
     hostLatencyMs: number
     networkLatencyMs: number
     streamerLatencyMs: number
+    jitterBufferDelayMs: number  // Time frames spend in jitter buffer before decode
     decodeLatencyMs: number
     networkRttMs: number
     packetLossPercent: number

@@ -256,3 +256,54 @@ Copy the frontend build output to the executable directory:
 Copy-Item -Path "moonlight-web\web-server\dist" -Destination "target\debug\dist" -Recurse -Force
 ```
 
+### Frontend changes not appearing / Old code running
+
+**Symptoms:**
+- Old console.log messages appearing
+- Old behavior despite code changes
+- Version number not updated
+
+**Causes & Solutions:**
+
+1. **Built from wrong directory:**
+   ```powershell
+   # WRONG - creates no output!
+   cd moonlight-web\web-server\web
+   npx tsc
+   
+   # CORRECT - tsconfig.json is here
+   cd moonlight-web\web-server
+   npx tsc
+   ```
+
+2. **Didn't copy to target directory:**
+   ```powershell
+   Copy-Item -Recurse -Force "moonlight-web\web-server\dist\*" "target\debug\dist\"
+   ```
+
+3. **Browser/WebView cache:**
+   - Browser: Hard refresh (Ctrl+Shift+R) or clear cache
+   - Android WebView: Clear app data/cache on device
+
+4. **Server not restarted:**
+   ```powershell
+   Get-Process -Name "web-server" -ErrorAction SilentlyContinue | Stop-Process -Force
+   ```
+
+### WebRTC stats showing wrong values (e.g., latency in seconds instead of ms)
+
+WebRTC reports many values in **seconds** (as floats), not milliseconds:
+- `currentRoundTripTime` - seconds (multiply by 1000 for ms)
+- `jitter` - seconds (multiply by 1000 for ms)
+- `totalDecodeTime` - cumulative seconds (divide by `framesDecoded`, then multiply by 1000)
+- `jitterBufferDelay` - cumulative seconds (divide by `jitterBufferEmittedCount`, then multiply by 1000)
+
+### Stats overlay not showing in hybrid mode
+
+Check `styles.css` for rules hiding elements in hybrid mode:
+```css
+/* This will hide stats - remove .video-stats if you want it visible */
+body.hybrid-mode .video-stats {
+    display: none !important;
+}
+```

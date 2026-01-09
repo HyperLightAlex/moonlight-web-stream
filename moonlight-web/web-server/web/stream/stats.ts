@@ -110,6 +110,10 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
     const decodeLatencyMs = statsData.transport.webrtcAvgDecodeTimeMs ? parseFloat(statsData.transport.webrtcAvgDecodeTimeMs) : null
     const decodeLatencyQuality = getLatencyQuality(decodeLatencyMs)
     
+    // Jitter buffer delay from WebRTC (already in ms) - time frames spend buffered before decode
+    const jitterBufferDelayMs = statsData.transport.webrtcAvgJitterBufferDelayMs ? parseFloat(statsData.transport.webrtcAvgJitterBufferDelayMs) : null
+    const jitterBufferQuality = getLatencyQuality(jitterBufferDelayMs)
+    
     const webrtcFps = statsData.transport.webrtcFps ? parseFloat(statsData.transport.webrtcFps) : null
     const fpsQuality = getFpsQuality(webrtcFps, statsData.videoFps)
     
@@ -256,7 +260,7 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
     }
     
     // Calculate total latency from available components
-    // Total = network latency (RTT/2) + host encode + streamer + decode
+    // Total = network latency (RTT/2) + host encode + streamer + jitter buffer + decode
     let totalLatencyMs: number | null = null
     const networkLatencyMs = rttMs != null ? rttMs / 2 : null
     
@@ -266,14 +270,15 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
     if (networkLatencyMs != null) { latencySum += networkLatencyMs; hasAnyLatency = true }
     if (statsData.avgHostProcessingLatencyMs != null) { latencySum += statsData.avgHostProcessingLatencyMs; hasAnyLatency = true }
     if (statsData.avgStreamerProcessingTimeMs != null) { latencySum += statsData.avgStreamerProcessingTimeMs; hasAnyLatency = true }
+    if (jitterBufferDelayMs != null) { latencySum += jitterBufferDelayMs; hasAnyLatency = true }
     if (decodeLatencyMs != null) { latencySum += decodeLatencyMs; hasAnyLatency = true }
     if (hasAnyLatency) totalLatencyMs = latencySum
     
-    // Quality for total latency
+    // Quality for total latency (adjusted thresholds since we now include more components)
     const getTotalLatencyQuality = (ms: number | null): QualityLevel => {
         if (ms == null) return "good"
-        if (ms < 50) return "good"
-        if (ms < 100) return "warn"
+        if (ms < 60) return "good"    // Raised from 50ms since we include more components
+        if (ms < 120) return "warn"   // Raised from 100ms
         return "bad"
     }
     const totalLatencyQuality = getTotalLatencyQuality(totalLatencyMs)
@@ -282,6 +287,7 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
     const hasLatencyData = rttMs != null || 
                            statsData.avgHostProcessingLatencyMs != null || 
                            statsData.avgStreamerProcessingTimeMs != null ||
+                           jitterBufferDelayMs != null ||
                            decodeLatencyMs != null
     
     // Build latency section only if we have data
@@ -292,9 +298,9 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
             <span class="stats-label"><strong>Total</strong></span>
             <span class="stats-value ${qualityClass(totalLatencyQuality)}"><strong>${formatMs(totalLatencyMs)}</strong></span>
         </div>` : ""}
-        ${rttMs != null ? `<div class="stats-row">
-            <span class="stats-label">RTT</span>
-            <span class="stats-value ${qualityClass(rttQuality)}">${formatMs(rttMs)}</span>
+        ${networkLatencyMs != null ? `<div class="stats-row">
+            <span class="stats-label">Network</span>
+            <span class="stats-value">${formatMs(networkLatencyMs)}</span>
         </div>` : ""}
         ${statsData.avgHostProcessingLatencyMs != null ? `<div class="stats-row">
             <span class="stats-label">Encode</span>
@@ -303,6 +309,10 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
         ${statsData.avgStreamerProcessingTimeMs != null ? `<div class="stats-row">
             <span class="stats-label">Streamer</span>
             <span class="stats-value ${qualityClass(streamerLatencyQuality)}">${formatMs(statsData.avgStreamerProcessingTimeMs)}</span>
+        </div>` : ""}
+        ${jitterBufferDelayMs != null ? `<div class="stats-row">
+            <span class="stats-label">Buffer</span>
+            <span class="stats-value ${qualityClass(jitterBufferQuality)}">${formatMs(jitterBufferDelayMs)}</span>
         </div>` : ""}
         ${decodeLatencyMs != null ? `<div class="stats-row">
             <span class="stats-label">Decode</span>
