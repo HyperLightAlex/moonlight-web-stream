@@ -255,6 +255,29 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
     </div>`
     }
     
+    // Calculate total latency from available components
+    // Total = network latency (RTT/2) + host encode + streamer + decode
+    let totalLatencyMs: number | null = null
+    const networkLatencyMs = rttMs != null ? rttMs / 2 : null
+    
+    // Sum available components
+    let latencySum = 0
+    let hasAnyLatency = false
+    if (networkLatencyMs != null) { latencySum += networkLatencyMs; hasAnyLatency = true }
+    if (statsData.avgHostProcessingLatencyMs != null) { latencySum += statsData.avgHostProcessingLatencyMs; hasAnyLatency = true }
+    if (statsData.avgStreamerProcessingTimeMs != null) { latencySum += statsData.avgStreamerProcessingTimeMs; hasAnyLatency = true }
+    if (decodeLatencyMs != null) { latencySum += decodeLatencyMs; hasAnyLatency = true }
+    if (hasAnyLatency) totalLatencyMs = latencySum
+    
+    // Quality for total latency
+    const getTotalLatencyQuality = (ms: number | null): QualityLevel => {
+        if (ms == null) return "good"
+        if (ms < 50) return "good"
+        if (ms < 100) return "warn"
+        return "bad"
+    }
+    const totalLatencyQuality = getTotalLatencyQuality(totalLatencyMs)
+    
     // Check if we have any latency data at all
     const hasLatencyData = rttMs != null || 
                            statsData.avgHostProcessingLatencyMs != null || 
@@ -265,6 +288,10 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
     const latencySection = hasLatencyData ? `
     <div class="stats-section">
         <div class="stats-section-title">⏱️ Latency</div>
+        ${totalLatencyMs != null ? `<div class="stats-row">
+            <span class="stats-label"><strong>Total</strong></span>
+            <span class="stats-value ${qualityClass(totalLatencyQuality)}"><strong>${formatMs(totalLatencyMs)}</strong></span>
+        </div>` : ""}
         ${rttMs != null ? `<div class="stats-row">
             <span class="stats-label">RTT</span>
             <span class="stats-value ${qualityClass(rttQuality)}">${formatMs(rttMs)}</span>

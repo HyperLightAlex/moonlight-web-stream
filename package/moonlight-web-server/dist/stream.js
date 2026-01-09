@@ -21,6 +21,8 @@ import { StreamKeys } from "./api_bindings.js";
 import { ScreenKeyboard } from "./screen_keyboard.js";
 import { FormModal } from "./component/modal/form.js";
 import { streamStatsToHtml } from "./stream/stats.js";
+// API version - increment when making changes to help debug deployments
+const MOONLIGHT_BRIDGE_VERSION = "1.1.0"; // Added proper latency averaging
 function startApp() {
     return __awaiter(this, void 0, void 0, function* () {
         const api = yield getApi();
@@ -103,6 +105,8 @@ function startApp() {
                 console.info("[MoonlightBridge] Keyboard hidden (blur)");
             });
             window.MoonlightBridge = {
+                // Version - helps track deployments
+                version: MOONLIGHT_BRIDGE_VERSION,
                 // Touch/Mouse settings
                 getTouchMode: () => app.getInputConfig().touchMode,
                 setTouchMode: (mode) => {

@@ -82,16 +82,23 @@ streamer latency: ${formatMs(statsData.avgStreamerProcessingTimeMs)}
     return text;
 }
 export function streamStatsToHtml(statsData) {
-    const rttQuality = getRttQuality(statsData.streamerRttMs);
+    // Get RTT: prefer WebRTC RTT (already in ms), fallback to streamer RTT
+    const webrtcRttMs = statsData.transport.webrtcRttMs ? parseFloat(statsData.transport.webrtcRttMs) : null;
+    const rttMs = webrtcRttMs !== null && webrtcRttMs !== void 0 ? webrtcRttMs : statsData.streamerRttMs;
+    const rttQuality = getRttQuality(rttMs);
     const hostLatencyQuality = getLatencyQuality(statsData.avgHostProcessingLatencyMs);
     const streamerLatencyQuality = getLatencyQuality(statsData.avgStreamerProcessingTimeMs);
+    // Decode latency from WebRTC (already in ms)
+    const decodeLatencyMs = statsData.transport.webrtcAvgDecodeTimeMs ? parseFloat(statsData.transport.webrtcAvgDecodeTimeMs) : null;
+    const decodeLatencyQuality = getLatencyQuality(decodeLatencyMs);
     const webrtcFps = statsData.transport.webrtcFps ? parseFloat(statsData.transport.webrtcFps) : null;
     const fpsQuality = getFpsQuality(webrtcFps, statsData.videoFps);
     const packetsLost = statsData.transport.webrtcPacketsLost ? parseInt(statsData.transport.webrtcPacketsLost) : 0;
     const packetsReceived = statsData.transport.webrtcPacketsReceived ? parseInt(statsData.transport.webrtcPacketsReceived) : 0;
     const packetLossQuality = getPacketLossQuality(packetsLost, packetsReceived);
     const packetLossPercent = packetsReceived > 0 ? ((packetsLost / (packetsLost + packetsReceived)) * 100) : 0;
-    const jitterMs = statsData.transport.webrtcJitterMs ? parseFloat(statsData.transport.webrtcJitterMs) * 1000 : null;
+    // webrtcJitterSec is in seconds, convert to ms
+    const jitterMs = statsData.transport.webrtcJitterSec ? parseFloat(statsData.transport.webrtcJitterSec) * 1000 : null;
     const jitterQuality = jitterMs != null && jitterMs > 30 ? "bad" : jitterMs != null && jitterMs > 10 ? "warn" : "good";
     // Calculate overall quality using weighted scoring
     // Weights: higher = more important to stream quality
@@ -127,14 +134,24 @@ export function streamStatsToHtml(statsData) {
     const overallLabel = overallQuality === "good" ? "Good" : overallQuality === "warn" ? "Fair" : "Poor";
     // Collect issues when quality is not good
     const issues = [];
-    if (rttQuality !== "good" && statsData.streamerRttMs != null) {
+    if (rttQuality !== "good" && rttMs != null) {
         issues.push({
             metric: "Network RTT",
-            value: formatMs(statsData.streamerRttMs),
+            value: formatMs(rttMs),
             severity: rttQuality,
             suggestion: rttQuality === "bad"
                 ? "High latency - check network connection or try wired ethernet"
                 : "Moderate latency - streaming over WiFi or internet?"
+        });
+    }
+    if (decodeLatencyQuality !== "good" && decodeLatencyMs != null) {
+        issues.push({
+            metric: "Decode Time",
+            value: formatMs(decodeLatencyMs),
+            severity: decodeLatencyQuality,
+            suggestion: decodeLatencyQuality === "bad"
+                ? "Slow decoding - device may be underpowered or codec unsupported"
+                : "Decode time elevated - close other apps using hardware decoder"
         });
     }
     if (hostLatencyQuality !== "good" && statsData.avgHostProcessingLatencyMs != null) {
@@ -207,16 +224,17 @@ export function streamStatsToHtml(statsData) {
     </div>`;
     }
     // Check if we have any latency data at all
-    const hasLatencyData = statsData.streamerRttMs != null ||
+    const hasLatencyData = rttMs != null ||
         statsData.avgHostProcessingLatencyMs != null ||
-        statsData.avgStreamerProcessingTimeMs != null;
+        statsData.avgStreamerProcessingTimeMs != null ||
+        decodeLatencyMs != null;
     // Build latency section only if we have data
     const latencySection = hasLatencyData ? `
     <div class="stats-section">
         <div class="stats-section-title">⏱️ Latency</div>
-        ${statsData.streamerRttMs != null ? `<div class="stats-row">
+        ${rttMs != null ? `<div class="stats-row">
             <span class="stats-label">RTT</span>
-            <span class="stats-value ${qualityClass(rttQuality)}">${formatMs(statsData.streamerRttMs)}</span>
+            <span class="stats-value ${qualityClass(rttQuality)}">${formatMs(rttMs)}</span>
         </div>` : ""}
         ${statsData.avgHostProcessingLatencyMs != null ? `<div class="stats-row">
             <span class="stats-label">Encode</span>
@@ -225,6 +243,10 @@ export function streamStatsToHtml(statsData) {
         ${statsData.avgStreamerProcessingTimeMs != null ? `<div class="stats-row">
             <span class="stats-label">Streamer</span>
             <span class="stats-value ${qualityClass(streamerLatencyQuality)}">${formatMs(statsData.avgStreamerProcessingTimeMs)}</span>
+        </div>` : ""}
+        ${decodeLatencyMs != null ? `<div class="stats-row">
+            <span class="stats-label">Decode</span>
+            <span class="stats-value ${qualityClass(decodeLatencyQuality)}">${formatMs(decodeLatencyMs)}</span>
         </div>` : ""}
     </div>` : "";
     return `
@@ -262,7 +284,8 @@ ${issuesHtml}
 export class StreamStats {
     constructor(logger) {
         this.logger = null;
-        this.enabled = false;
+        this.enabled = false; // Controls overlay visibility
+        this.collecting = false; // Controls data collection (always on when transport set)
         this.transport = null;
         this.statsChannel = null;
         this.updateIntervalId = null;
@@ -289,38 +312,34 @@ export class StreamStats {
     }
     setTransport(transport) {
         this.transport = transport;
-        this.checkEnabled();
+        // Always start collecting when transport is set (for getStreamHealth API)
+        this.startCollecting();
     }
-    checkEnabled() {
+    // Start collecting stats (separate from display)
+    startCollecting() {
         var _a;
-        if (this.enabled) {
-            if (this.statsChannel) {
-                this.statsChannel.removeReceiveListener(this.onRawData.bind(this));
-                this.statsChannel = null;
+        if (this.collecting)
+            return;
+        this.collecting = true;
+        // Set up stats channel for server-side latency data
+        if (!this.statsChannel && this.transport) {
+            const channel = this.transport.getChannel(TransportChannelId.STATS);
+            if (channel.type != "data") {
+                (_a = this.logger) === null || _a === void 0 ? void 0 : _a.debug(`Failed initialize debug transport channel because type is "${channel.type}" and not "data"`);
             }
-            if (!this.statsChannel && this.transport) {
-                const channel = this.transport.getChannel(TransportChannelId.STATS);
-                if (channel.type != "data") {
-                    (_a = this.logger) === null || _a === void 0 ? void 0 : _a.debug(`Failed initialize debug transport channel because type is "${channel.type}" and not "data"`);
-                    return;
-                }
+            else {
                 channel.addReceiveListener(this.onRawData.bind(this));
                 this.statsChannel = channel;
             }
-            if (this.updateIntervalId == null) {
-                this.updateIntervalId = setInterval(this.updateLocalStats.bind(this), 1000);
-            }
         }
-        else {
-            if (this.updateIntervalId != null) {
-                clearInterval(this.updateIntervalId);
-                this.updateIntervalId = null;
-            }
+        // Start interval for WebRTC transport stats
+        if (this.updateIntervalId == null) {
+            this.updateIntervalId = setInterval(this.updateLocalStats.bind(this), 1000);
         }
     }
     setEnabled(enabled) {
         this.enabled = enabled;
-        this.checkEnabled();
+        // Note: collection continues regardless of enabled state
     }
     isEnabled() {
         return this.enabled;

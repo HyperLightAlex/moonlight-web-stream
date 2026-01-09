@@ -479,11 +479,12 @@ export class Stream {
             const currentFps = stats.transport.webrtcFps ? parseFloat(stats.transport.webrtcFps) : -1;
             const hostLatencyMs = (_d = stats.avgHostProcessingLatencyMs) !== null && _d !== void 0 ? _d : -1;
             const streamerLatencyMs = (_e = stats.avgStreamerProcessingTimeMs) !== null && _e !== void 0 ? _e : -1;
-            const networkRttMs = connectionInfo.rttMs > 0 ? connectionInfo.rttMs : ((_f = stats.streamerRttMs) !== null && _f !== void 0 ? _f : -1);
+            // Network RTT: prefer WebRTC stats (already in ms), fall back to streamer RTT
+            const webrtcRttMs = stats.transport.webrtcRttMs ? parseFloat(stats.transport.webrtcRttMs) : -1;
+            const networkRttMs = webrtcRttMs > 0 ? webrtcRttMs : (connectionInfo.rttMs > 0 ? connectionInfo.rttMs : ((_f = stats.streamerRttMs) !== null && _f !== void 0 ? _f : -1));
             const networkLatencyMs = networkRttMs > 0 ? networkRttMs / 2 : -1;
-            // Decode latency from WebRTC stats (approximate from jitter buffer)
-            const jitterBufferDelay = stats.transport.webrtcJitterBufferDelayMs ? parseFloat(stats.transport.webrtcJitterBufferDelayMs) * 1000 : -1;
-            const decodeLatencyMs = jitterBufferDelay > 0 ? jitterBufferDelay : -1;
+            // Decode latency from WebRTC stats (avg decode time, already in ms)
+            const decodeLatencyMs = stats.transport.webrtcAvgDecodeTimeMs ? parseFloat(stats.transport.webrtcAvgDecodeTimeMs) : -1;
             // Calculate total latency (sum of available components)
             let totalLatencyMs = 0;
             let hasLatencyData = false;
@@ -509,24 +510,97 @@ export class Stream {
             const packetsReceived = stats.transport.webrtcPacketsReceived ? parseInt(stats.transport.webrtcPacketsReceived) : 0;
             const packetsLost = stats.transport.webrtcPacketsLost ? parseInt(stats.transport.webrtcPacketsLost) : 0;
             const packetLossPercent = packetsReceived > 0 ? (packetsLost / (packetsReceived + packetsLost)) * 100 : -1;
-            // Jitter
-            const jitterMs = stats.transport.webrtcJitterMs ? parseFloat(stats.transport.webrtcJitterMs) * 1000 : -1;
+            // Jitter: webrtcJitterSec is in seconds, convert to ms
+            const jitterMs = stats.transport.webrtcJitterSec ? parseFloat(stats.transport.webrtcJitterSec) * 1000 : -1;
             // Resolution string
             const resolution = stats.videoWidth && stats.videoHeight
                 ? `${stats.videoWidth}x${stats.videoHeight}`
                 : "unknown";
             // Bitrate (not directly available, use -1)
             const bitrateMbps = -1;
-            // Calculate quality
-            let quality = "poor";
-            const effectiveLatency = totalLatencyMs > 0 ? totalLatencyMs : 0;
-            const effectiveLoss = packetLossPercent > 0 ? packetLossPercent : 0;
-            const effectiveFps = currentFps > 0 ? currentFps : targetFps;
-            if (effectiveLatency < 50 && effectiveLoss < 0.5 && effectiveFps >= targetFps - 5) {
+            // Helper functions for individual metric quality
+            const getRttQuality = (ms) => {
+                if (ms <= 0)
+                    return "good"; // No data = assume good
+                if (ms < 50)
+                    return "good";
+                if (ms < 100)
+                    return "warn";
+                return "bad";
+            };
+            const getLatencyQuality = (ms) => {
+                if (ms <= 0)
+                    return "good"; // No data = assume good
+                if (ms < 20)
+                    return "good";
+                if (ms < 50)
+                    return "warn";
+                return "bad";
+            };
+            const getFpsQuality = (current, target) => {
+                if (current <= 0)
+                    return "good"; // No data = assume good
+                const diff = target - current;
+                if (diff <= 5)
+                    return "good";
+                if (diff <= 15)
+                    return "warn";
+                return "bad";
+            };
+            const getPacketLossQuality = (percent) => {
+                if (percent <= 0)
+                    return "good";
+                if (percent < 0.5)
+                    return "good";
+                if (percent < 2)
+                    return "warn";
+                return "bad";
+            };
+            const getJitterQuality = (ms) => {
+                if (ms <= 0)
+                    return "good"; // No data = assume good
+                if (ms < 10)
+                    return "good";
+                if (ms < 30)
+                    return "warn";
+                return "bad";
+            };
+            // Calculate individual qualities
+            const rttQuality = getRttQuality(networkRttMs);
+            const hostLatQuality = getLatencyQuality(hostLatencyMs);
+            const streamerLatQuality = getLatencyQuality(streamerLatencyMs);
+            const decodeLatQuality = getLatencyQuality(decodeLatencyMs);
+            const fpsQuality = getFpsQuality(currentFps, targetFps);
+            const lossQuality = getPacketLossQuality(packetLossPercent);
+            const jitterQuality = getJitterQuality(jitterMs);
+            // Weighted scoring: higher weight = more important to stream quality
+            const weights = [
+                { quality: lossQuality, weight: 3 }, // Packet loss is critical
+                { quality: fpsQuality, weight: 2 }, // FPS drops are noticeable
+                { quality: rttQuality, weight: 2 }, // RTT affects responsiveness
+                { quality: jitterQuality, weight: 2 }, // Jitter causes stuttering
+                { quality: hostLatQuality, weight: 1 }, // Host latency informational
+                { quality: streamerLatQuality, weight: 1 }, // Streamer latency informational
+                { quality: decodeLatQuality, weight: 1 }, // Decode latency informational
+            ];
+            let totalScore = 0;
+            let totalWeight = 0;
+            for (const { quality: q, weight } of weights) {
+                const score = q === "good" ? 0 : q === "warn" ? 1 : 2;
+                totalScore += score * weight;
+                totalWeight += weight;
+            }
+            const normalizedScore = totalScore / totalWeight;
+            // Map to quality: <0.5 = good, <1.2 = fair, >=1.2 = poor
+            let quality;
+            if (normalizedScore < 0.5) {
                 quality = "good";
             }
-            else if (effectiveLatency < 100 && effectiveLoss < 2 && effectiveFps >= targetFps - 15) {
+            else if (normalizedScore < 1.2) {
                 quality = "fair";
+            }
+            else {
+                quality = "poor";
             }
             return {
                 quality,
