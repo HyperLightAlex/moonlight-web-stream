@@ -12,7 +12,7 @@ import { emptyVideoFormats, getStandardVideoFormats, getSupportedVideoFormats, h
 import { StreamCapabilities, StreamKeys } from "./api_bindings.js";
 import { ScreenKeyboard, TextEvent } from "./screen_keyboard.js";
 import { FormModal } from "./component/modal/form.js";
-import { streamStatsToText } from "./stream/stats.js";
+import { streamStatsToHtml } from "./stream/stats.js";
 
 // MoonlightBridge API for hybrid mode Android client
 declare global {
@@ -332,8 +332,8 @@ class ViewerApp implements Component {
             if (stats && stats.isEnabled()) {
                 this.statsDiv.hidden = false
 
-                const text = streamStatsToText(stats.getCurrentStats())
-                this.statsDiv.innerText = text
+                const html = streamStatsToHtml(stats.getCurrentStats())
+                this.statsDiv.innerHTML = html
             } else {
                 this.statsDiv.hidden = true
             }
