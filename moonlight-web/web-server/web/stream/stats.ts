@@ -186,80 +186,80 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
         })
     }
     
-    // Sort issues by severity (bad first, then warn)
+    // Sort issues by severity (bad first, then warn) and limit to top 3
     issues.sort((a, b) => {
         if (a.severity === "bad" && b.severity !== "bad") return -1
         if (a.severity !== "bad" && b.severity === "bad") return 1
         return 0
     })
+    const topIssues = issues.slice(0, 3)
     
-    // Build issues HTML
+    // Build compact issues HTML
     let issuesHtml = ""
-    if (issues.length > 0) {
+    if (topIssues.length > 0) {
         issuesHtml = `
     <div class="stats-section stats-issues">
-        <div class="stats-section-title">⚠️ Issues Detected</div>
-        ${issues.map(issue => `
-        <div class="stats-issue ${qualityClass(issue.severity)}">
-            <div class="stats-issue-header">
-                <span class="stats-issue-metric">${issue.metric}</span>
-                <span class="stats-issue-value">${issue.value}</span>
-            </div>
-            <div class="stats-issue-suggestion">${issue.suggestion}</div>
+        <div class="stats-section-title">⚠️ Issues</div>
+        ${topIssues.map(issue => `
+        <div class="stats-row stats-issue-row ${qualityClass(issue.severity)}">
+            <span class="stats-label">${issue.metric}</span>
+            <span class="stats-value">${issue.value}</span>
         </div>`).join("")}
     </div>`
     }
     
+    // Check if we have any latency data at all
+    const hasLatencyData = statsData.streamerRttMs != null || 
+                           statsData.avgHostProcessingLatencyMs != null || 
+                           statsData.avgStreamerProcessingTimeMs != null
+    
+    // Build latency section only if we have data
+    const latencySection = hasLatencyData ? `
+    <div class="stats-section">
+        <div class="stats-section-title">⏱️ Latency</div>
+        ${statsData.streamerRttMs != null ? `<div class="stats-row">
+            <span class="stats-label">RTT</span>
+            <span class="stats-value ${qualityClass(rttQuality)}">${formatMs(statsData.streamerRttMs)}</span>
+        </div>` : ""}
+        ${statsData.avgHostProcessingLatencyMs != null ? `<div class="stats-row">
+            <span class="stats-label">Encode</span>
+            <span class="stats-value ${qualityClass(hostLatencyQuality)}">${formatMs(statsData.avgHostProcessingLatencyMs)}</span>
+        </div>` : ""}
+        ${statsData.avgStreamerProcessingTimeMs != null ? `<div class="stats-row">
+            <span class="stats-label">Streamer</span>
+            <span class="stats-value ${qualityClass(streamerLatencyQuality)}">${formatMs(statsData.avgStreamerProcessingTimeMs)}</span>
+        </div>` : ""}
+    </div>` : ""
+
     return `
 <div class="stats-panel">
     <div class="stats-header">
-        <span class="stats-title">Stream Stats</span>
+        <span class="stats-title">Stats</span>
         <span class="stats-quality ${qualityClass(overallQuality)}">${overallLabel}</span>
     </div>
-    
     <div class="stats-section">
-        <div class="stats-section-title">📺 Video</div>
         <div class="stats-row">
-            <span class="stats-label">Codec</span>
-            <span class="stats-value">${statsData.videoCodec || "-"}${statsData.decoderImplementation ? ` <span class="stats-dim">(${statsData.decoderImplementation})</span>` : ""}</span>
+            <span class="stats-label">Video</span>
+            <span class="stats-value">${statsData.videoCodec || "?"}${statsData.decoderImplementation ? ` <span class="stats-dim">${statsData.decoderImplementation}</span>` : ""}</span>
         </div>
         <div class="stats-row">
             <span class="stats-label">Resolution</span>
-            <span class="stats-value">${statsData.videoWidth || "-"}×${statsData.videoHeight || "-"}</span>
+            <span class="stats-value">${statsData.videoWidth || "?"}×${statsData.videoHeight || "?"}</span>
         </div>
         <div class="stats-row">
             <span class="stats-label">FPS</span>
-            <span class="stats-value ${qualityClass(fpsQuality)}">${num(webrtcFps, 0)} <span class="stats-dim">/ ${statsData.videoFps || "-"}</span></span>
-        </div>
-    </div>
-    
-    <div class="stats-section">
-        <div class="stats-section-title">⏱️ Latency</div>
-        <div class="stats-row">
-            <span class="stats-label">Network RTT</span>
-            <span class="stats-value ${qualityClass(rttQuality)}">${formatMs(statsData.streamerRttMs)}</span>
+            <span class="stats-value ${qualityClass(fpsQuality)}">${num(webrtcFps, 0)}<span class="stats-dim">/${statsData.videoFps || "?"}</span></span>
         </div>
         <div class="stats-row">
-            <span class="stats-label">Host Encode</span>
-            <span class="stats-value ${qualityClass(hostLatencyQuality)}">${formatMs(statsData.avgHostProcessingLatencyMs)}</span>
+            <span class="stats-label">Loss</span>
+            <span class="stats-value ${qualityClass(packetLossQuality)}">${packetLossPercent.toFixed(1)}%</span>
         </div>
-        <div class="stats-row">
-            <span class="stats-label">Streamer</span>
-            <span class="stats-value ${qualityClass(streamerLatencyQuality)}">${formatMs(statsData.avgStreamerProcessingTimeMs)}</span>
-        </div>
-    </div>
-    
-    <div class="stats-section">
-        <div class="stats-section-title">📡 Network</div>
-        <div class="stats-row">
-            <span class="stats-label">Packet Loss</span>
-            <span class="stats-value ${qualityClass(packetLossQuality)}">${packetLossPercent.toFixed(2)}%</span>
-        </div>
-        <div class="stats-row">
+        ${jitterMs != null ? `<div class="stats-row">
             <span class="stats-label">Jitter</span>
-            <span class="stats-value ${qualityClass(jitterQuality)}">${jitterMs != null ? formatMs(jitterMs) : "-"}</span>
-        </div>
+            <span class="stats-value ${qualityClass(jitterQuality)}">${formatMs(jitterMs, 0)}</span>
+        </div>` : ""}
     </div>
+${latencySection}
 ${issuesHtml}
 </div>`
 }
