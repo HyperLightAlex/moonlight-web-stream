@@ -555,6 +555,94 @@ export class Stream implements Component {
     getCapabilities(): StreamCapabilities | null {
         return this.capabilities
     }
+
+    async getStreamHealth(): Promise<StreamHealthData> {
+        const stats = this.stats.getCurrentStats()
+        const connectionInfo = await this.transport?.getConnectionInfo() ?? { connectionType: "unknown", isRelay: false, rttMs: -1 }
+        
+        // Extract values with defaults
+        const targetFps = stats.videoFps ?? 60
+        const currentFps = stats.transport.webrtcFps ? parseFloat(stats.transport.webrtcFps) : -1
+        const hostLatencyMs = stats.avgHostProcessingLatencyMs ?? -1
+        const streamerLatencyMs = stats.avgStreamerProcessingTimeMs ?? -1
+        const networkRttMs = connectionInfo.rttMs > 0 ? connectionInfo.rttMs : (stats.streamerRttMs ?? -1)
+        const networkLatencyMs = networkRttMs > 0 ? networkRttMs / 2 : -1
+        
+        // Decode latency from WebRTC stats (approximate from jitter buffer)
+        const jitterBufferDelay = stats.transport.webrtcJitterBufferDelayMs ? parseFloat(stats.transport.webrtcJitterBufferDelayMs) * 1000 : -1
+        const decodeLatencyMs = jitterBufferDelay > 0 ? jitterBufferDelay : -1
+        
+        // Calculate total latency (sum of available components)
+        let totalLatencyMs = 0
+        let hasLatencyData = false
+        if (hostLatencyMs > 0) { totalLatencyMs += hostLatencyMs; hasLatencyData = true }
+        if (networkLatencyMs > 0) { totalLatencyMs += networkLatencyMs; hasLatencyData = true }
+        if (streamerLatencyMs > 0) { totalLatencyMs += streamerLatencyMs; hasLatencyData = true }
+        if (decodeLatencyMs > 0) { totalLatencyMs += decodeLatencyMs; hasLatencyData = true }
+        if (!hasLatencyData) totalLatencyMs = -1
+        
+        // Packet loss calculation
+        const packetsReceived = stats.transport.webrtcPacketsReceived ? parseInt(stats.transport.webrtcPacketsReceived) : 0
+        const packetsLost = stats.transport.webrtcPacketsLost ? parseInt(stats.transport.webrtcPacketsLost) : 0
+        const packetLossPercent = packetsReceived > 0 ? (packetsLost / (packetsReceived + packetsLost)) * 100 : -1
+        
+        // Jitter
+        const jitterMs = stats.transport.webrtcJitterMs ? parseFloat(stats.transport.webrtcJitterMs) * 1000 : -1
+        
+        // Resolution string
+        const resolution = stats.videoWidth && stats.videoHeight 
+            ? `${stats.videoWidth}x${stats.videoHeight}` 
+            : "unknown"
+        
+        // Bitrate (not directly available, use -1)
+        const bitrateMbps = -1
+        
+        // Calculate quality
+        let quality: "good" | "fair" | "poor" = "poor"
+        const effectiveLatency = totalLatencyMs > 0 ? totalLatencyMs : 0
+        const effectiveLoss = packetLossPercent > 0 ? packetLossPercent : 0
+        const effectiveFps = currentFps > 0 ? currentFps : targetFps
+        
+        if (effectiveLatency < 50 && effectiveLoss < 0.5 && effectiveFps >= targetFps - 5) {
+            quality = "good"
+        } else if (effectiveLatency < 100 && effectiveLoss < 2 && effectiveFps >= targetFps - 15) {
+            quality = "fair"
+        }
+        
+        return {
+            quality,
+            totalLatencyMs: Math.round(totalLatencyMs * 100) / 100,
+            hostLatencyMs: Math.round(hostLatencyMs * 100) / 100,
+            networkLatencyMs: Math.round(networkLatencyMs * 100) / 100,
+            streamerLatencyMs: Math.round(streamerLatencyMs * 100) / 100,
+            decodeLatencyMs: Math.round(decodeLatencyMs * 100) / 100,
+            networkRttMs: Math.round(networkRttMs * 100) / 100,
+            packetLossPercent: Math.round(packetLossPercent * 1000) / 1000,
+            jitterMs: Math.round(jitterMs * 100) / 100,
+            fps: Math.round(currentFps * 10) / 10,
+            bitrateMbps,
+            resolution,
+            connectionType: connectionInfo.connectionType as "lan" | "wan" | "relay" | "unknown",
+            isRelayConnection: connectionInfo.isRelay
+        }
+    }
+}
+
+export type StreamHealthData = {
+    quality: "good" | "fair" | "poor"
+    totalLatencyMs: number
+    hostLatencyMs: number
+    networkLatencyMs: number
+    streamerLatencyMs: number
+    decodeLatencyMs: number
+    networkRttMs: number
+    packetLossPercent: number
+    jitterMs: number
+    fps: number
+    bitrateMbps: number
+    resolution: string
+    connectionType: "lan" | "wan" | "relay" | "unknown"
+    isRelayConnection: boolean
 }
 
 function createPrettyList(list: Array<string>): string {

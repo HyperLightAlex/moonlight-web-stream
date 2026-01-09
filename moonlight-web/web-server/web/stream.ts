@@ -50,6 +50,9 @@ interface MoonlightBridgeAPI {
     toggleStats: () => void;
     isStatsVisible: () => boolean;
     
+    // Stream health (for native quality indicator)
+    getStreamHealth: () => Promise<string>;
+    
     // Text/Key input (for native soft keyboard)
     sendText: (text: string) => void;
     sendKey: (isDown: boolean, keyCode: number, modifiers: number) => void;
@@ -232,6 +235,31 @@ async function startApp() {
             },
             isStatsVisible: () => {
                 return app.getStream()?.getStats()?.isEnabled() ?? false
+            },
+            
+            // Stream health (for native quality indicator)
+            getStreamHealth: async () => {
+                const stream = app.getStream()
+                if (!stream) {
+                    return JSON.stringify({
+                        quality: "unknown",
+                        totalLatencyMs: -1,
+                        hostLatencyMs: -1,
+                        networkLatencyMs: -1,
+                        streamerLatencyMs: -1,
+                        decodeLatencyMs: -1,
+                        networkRttMs: -1,
+                        packetLossPercent: -1,
+                        jitterMs: -1,
+                        fps: -1,
+                        bitrateMbps: -1,
+                        resolution: "unknown",
+                        connectionType: "unknown",
+                        isRelayConnection: false
+                    })
+                }
+                const health = await stream.getStreamHealth()
+                return JSON.stringify(health)
             },
             
             // Text/Key input (for native soft keyboard)

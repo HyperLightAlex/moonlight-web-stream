@@ -57,6 +57,11 @@ export class WebSocketTransport implements Transport {
     getStats(): Promise<Record<string, string>> {
         throw new Error("Method not implemented.");
     }
+    
+    async getConnectionInfo(): Promise<{ connectionType: string, isRelay: boolean, rttMs: number }> {
+        // WebSocket transport doesn't have detailed connection info
+        return { connectionType: "unknown", isRelay: false, rttMs: -1 }
+    }
 
 }
 

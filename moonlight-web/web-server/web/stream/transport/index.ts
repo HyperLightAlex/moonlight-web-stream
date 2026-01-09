@@ -72,6 +72,7 @@ export interface Transport {
     close(): Promise<void>
 
     getStats(): Promise<Record<string, string>>
+    getConnectionInfo(): Promise<{ connectionType: string, isRelay: boolean, rttMs: number }>
 }
 
 export type TransportChannel = VideoTrackTransportChannel | AudioTrackTransportChannel | DataTransportChannel

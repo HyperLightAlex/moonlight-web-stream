@@ -356,6 +356,45 @@ export class WebRTCTransport implements Transport {
         this.peer?.close()
     }
 
+    async getConnectionInfo(): Promise<{ connectionType: string, isRelay: boolean, rttMs: number }> {
+        if (!this.peer) {
+            return { connectionType: "unknown", isRelay: false, rttMs: -1 }
+        }
+
+        try {
+            const stats = await this.peer.getStats()
+            for (const [, value] of stats.entries()) {
+                if (value.type === "candidate-pair" && value.state === "succeeded") {
+                    const localCandidateId = value.localCandidateId
+                    const rttMs = value.currentRoundTripTime ? value.currentRoundTripTime * 1000 : -1
+                    
+                    // Find the local candidate to determine connection type
+                    for (const [, candidate] of stats.entries()) {
+                        if (candidate.type === "local-candidate" && candidate.id === localCandidateId) {
+                            const candidateType = candidate.candidateType || "unknown"
+                            const isRelay = candidateType === "relay"
+                            let connectionType = "unknown"
+                            
+                            if (isRelay) {
+                                connectionType = "relay"
+                            } else if (candidateType === "host") {
+                                connectionType = "lan"
+                            } else {
+                                connectionType = "wan"
+                            }
+                            
+                            return { connectionType, isRelay, rttMs }
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn("[WebRTC]: Failed to get connection info", e)
+        }
+        
+        return { connectionType: "unknown", isRelay: false, rttMs: -1 }
+    }
+
     async getStats(): Promise<Record<string, string>> {
         const statsData: Record<string, string> = {}
 
