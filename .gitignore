@@ -5,3 +5,7 @@ ignore
 
 # VsCode
 .vscode
+
+# Distribution artifacts
+/package
+*.zip
