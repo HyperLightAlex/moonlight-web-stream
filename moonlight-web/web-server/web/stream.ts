@@ -21,7 +21,13 @@ declare global {
     }
 }
 
+// API version - increment when making changes to help debug deployments
+const MOONLIGHT_BRIDGE_VERSION = "1.1.0"  // Added proper latency averaging
+
 interface MoonlightBridgeAPI {
+    // Version - check with MoonlightBridge.version
+    version: string;
+    
     // Touch/Mouse settings
     getTouchMode: () => TouchMode;
     setTouchMode: (mode: TouchMode) => void;
@@ -150,6 +156,9 @@ async function startApp() {
         })
         
         window.MoonlightBridge = {
+            // Version - helps track deployments
+            version: MOONLIGHT_BRIDGE_VERSION,
+            
             // Touch/Mouse settings
             getTouchMode: () => app.getInputConfig().touchMode,
             setTouchMode: (mode) => {
