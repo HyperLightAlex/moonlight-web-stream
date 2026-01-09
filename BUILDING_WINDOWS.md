@@ -41,6 +41,8 @@ npm run build
 
 This compiles TypeScript to JavaScript and copies static assets to `moonlight-web/web-server/dist/`.
 
+> ⚠️ **IMPORTANT:** The `tsconfig.json` is in `moonlight-web/web-server/`, so TypeScript compilation must be run from that directory, NOT from `moonlight-web/web-server/web/`.
+
 ### 3. Build the Rust Backend
 
 ```powershell
@@ -125,6 +127,112 @@ Copy-Item -Path "moonlight-web\web-server\dist" -Destination "target\debug\dist"
 
 Write-Host "`nBuild complete! Run with: .\target\debug\web-server.exe" -ForegroundColor Green
 ```
+
+## Frontend-Only Development
+
+When making changes only to the web frontend (TypeScript/CSS), you don't need to rebuild the Rust backend:
+
+### Quick Frontend Update
+
+```powershell
+# 1. Compile TypeScript (MUST run from web-server directory, not web/ subdirectory!)
+cd moonlight-web\web-server
+npx tsc
+
+# 2. Copy static assets (CSS, HTML, etc.)
+npm run copy-static
+
+# 3. Deploy to running server
+Copy-Item -Recurse -Force "dist\*" "..\..\target\debug\dist\"
+
+# 4. Restart the server (or refresh browser if server auto-reloads)
+Get-Process -Name "web-server" -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 1
+cd ..\..\target\debug
+.\web-server.exe
+```
+
+### Verifying Frontend Updates
+
+The frontend exposes a version number to help verify correct deployment:
+
+```javascript
+// In browser console or via Android WebView JS bridge:
+MoonlightBridge.version  // Returns e.g., "1.2.0"
+```
+
+If you see old behavior after deploying, the issue is likely:
+1. **Wrong build directory** - TypeScript must be compiled from `moonlight-web/web-server/`, not `moonlight-web/web-server/web/`
+2. **Cached files** - Clear browser cache or WebView app data
+3. **Didn't copy to target** - Frontend must be copied to `target/debug/dist/`
+
+---
+
+## Creating Distribution Packages
+
+To package the web server for distribution:
+
+```powershell
+cd C:\path\to\moonlight-web-stream
+
+# Clean up old package
+Remove-Item -Force "moonlight-web-server-win64.zip" -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force "package" -ErrorAction SilentlyContinue
+
+# Create package directory
+New-Item -ItemType Directory -Force -Path "package\moonlight-web-server" | Out-Null
+
+# Copy executable and frontend
+Copy-Item "target\debug\web-server.exe" "package\moonlight-web-server\"
+Copy-Item -Recurse "target\debug\dist" "package\moonlight-web-server\"
+
+# Create zip archive
+Compress-Archive -Path "package\moonlight-web-server\*" -DestinationPath "moonlight-web-server-win64.zip" -Force
+```
+
+The resulting `moonlight-web-server-win64.zip` contains:
+- `web-server.exe` - The server executable
+- `dist/` - All frontend assets (HTML, JS, CSS)
+
+> **Note:** The `package/` folder and `*.zip` files are excluded from git (see `.gitignore`).
+
+---
+
+## Hybrid Mode / Android WebView Development
+
+When developing for the hybrid streaming mode (Android WebView):
+
+### Clearing WebView Cache
+
+Android WebView aggressively caches JavaScript files. After updating the frontend:
+
+1. **On Android device:** Settings → Apps → [Your App] → Storage → Clear Cache (or Clear Data)
+2. **Or in-app:** Implement cache-clearing in your Android app
+
+### Checking Deployed Version
+
+```javascript
+// Call from Android via evaluateJavascript:
+MoonlightBridge.version
+```
+
+### MoonlightBridge API
+
+The frontend exposes `window.MoonlightBridge` for native Android integration:
+
+| Method | Description |
+|--------|-------------|
+| `version` | Returns API version string (e.g., "1.2.0") |
+| `getStreamHealth()` | Returns JSON with quality metrics (async) |
+| `toggleStats()` | Shows/hides detailed stats overlay |
+| `isStatsVisible()` | Returns boolean |
+| `getTouchMode()` / `setTouchMode()` | Touch input mode |
+| `getMouseMode()` / `setMouseMode()` | Mouse input mode |
+| `showKeyboard()` / `hideKeyboard()` | Soft keyboard control |
+| `sendText(text)` | Send text input |
+| `sendKey(isDown, keyCode, modifiers)` | Send key events |
+
+---
 
 ## Troubleshooting
 
