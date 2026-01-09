@@ -565,12 +565,14 @@ export class Stream implements Component {
         const currentFps = stats.transport.webrtcFps ? parseFloat(stats.transport.webrtcFps) : -1
         const hostLatencyMs = stats.avgHostProcessingLatencyMs ?? -1
         const streamerLatencyMs = stats.avgStreamerProcessingTimeMs ?? -1
-        const networkRttMs = connectionInfo.rttMs > 0 ? connectionInfo.rttMs : (stats.streamerRttMs ?? -1)
+        
+        // Network RTT: prefer WebRTC stats (already in ms), fall back to streamer RTT
+        const webrtcRttMs = stats.transport.webrtcRttMs ? parseFloat(stats.transport.webrtcRttMs) : -1
+        const networkRttMs = webrtcRttMs > 0 ? webrtcRttMs : (connectionInfo.rttMs > 0 ? connectionInfo.rttMs : (stats.streamerRttMs ?? -1))
         const networkLatencyMs = networkRttMs > 0 ? networkRttMs / 2 : -1
         
-        // Decode latency from WebRTC stats (approximate from jitter buffer)
-        const jitterBufferDelay = stats.transport.webrtcJitterBufferDelayMs ? parseFloat(stats.transport.webrtcJitterBufferDelayMs) * 1000 : -1
-        const decodeLatencyMs = jitterBufferDelay > 0 ? jitterBufferDelay : -1
+        // Decode latency from WebRTC stats (avg decode time, already in ms)
+        const decodeLatencyMs = stats.transport.webrtcAvgDecodeTimeMs ? parseFloat(stats.transport.webrtcAvgDecodeTimeMs) : -1
         
         // Calculate total latency (sum of available components)
         let totalLatencyMs = 0
@@ -586,8 +588,8 @@ export class Stream implements Component {
         const packetsLost = stats.transport.webrtcPacketsLost ? parseInt(stats.transport.webrtcPacketsLost) : 0
         const packetLossPercent = packetsReceived > 0 ? (packetsLost / (packetsReceived + packetsLost)) * 100 : -1
         
-        // Jitter
-        const jitterMs = stats.transport.webrtcJitterMs ? parseFloat(stats.transport.webrtcJitterMs) * 1000 : -1
+        // Jitter: webrtcJitterSec is in seconds, convert to ms
+        const jitterMs = stats.transport.webrtcJitterSec ? parseFloat(stats.transport.webrtcJitterSec) * 1000 : -1
         
         // Resolution string
         const resolution = stats.videoWidth && stats.videoHeight 

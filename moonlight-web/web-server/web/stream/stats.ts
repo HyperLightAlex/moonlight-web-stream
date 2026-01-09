@@ -98,9 +98,17 @@ type QualityIssue = {
 }
 
 export function streamStatsToHtml(statsData: StreamStatsData): string {
-    const rttQuality = getRttQuality(statsData.streamerRttMs)
+    // Get RTT: prefer WebRTC RTT (already in ms), fallback to streamer RTT
+    const webrtcRttMs = statsData.transport.webrtcRttMs ? parseFloat(statsData.transport.webrtcRttMs) : null
+    const rttMs = webrtcRttMs ?? statsData.streamerRttMs
+    const rttQuality = getRttQuality(rttMs)
+    
     const hostLatencyQuality = getLatencyQuality(statsData.avgHostProcessingLatencyMs)
     const streamerLatencyQuality = getLatencyQuality(statsData.avgStreamerProcessingTimeMs)
+    
+    // Decode latency from WebRTC (already in ms)
+    const decodeLatencyMs = statsData.transport.webrtcAvgDecodeTimeMs ? parseFloat(statsData.transport.webrtcAvgDecodeTimeMs) : null
+    const decodeLatencyQuality = getLatencyQuality(decodeLatencyMs)
     
     const webrtcFps = statsData.transport.webrtcFps ? parseFloat(statsData.transport.webrtcFps) : null
     const fpsQuality = getFpsQuality(webrtcFps, statsData.videoFps)
@@ -110,7 +118,8 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
     const packetLossQuality = getPacketLossQuality(packetsLost, packetsReceived)
     const packetLossPercent = packetsReceived > 0 ? ((packetsLost / (packetsLost + packetsReceived)) * 100) : 0
     
-    const jitterMs = statsData.transport.webrtcJitterMs ? parseFloat(statsData.transport.webrtcJitterMs) * 1000 : null
+    // webrtcJitterSec is in seconds, convert to ms
+    const jitterMs = statsData.transport.webrtcJitterSec ? parseFloat(statsData.transport.webrtcJitterSec) * 1000 : null
     const jitterQuality: QualityLevel = jitterMs != null && jitterMs > 30 ? "bad" : jitterMs != null && jitterMs > 10 ? "warn" : "good"
     
     // Calculate overall quality using weighted scoring
@@ -150,14 +159,25 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
     // Collect issues when quality is not good
     const issues: QualityIssue[] = []
     
-    if (rttQuality !== "good" && statsData.streamerRttMs != null) {
+    if (rttQuality !== "good" && rttMs != null) {
         issues.push({
             metric: "Network RTT",
-            value: formatMs(statsData.streamerRttMs),
+            value: formatMs(rttMs),
             severity: rttQuality,
             suggestion: rttQuality === "bad" 
                 ? "High latency - check network connection or try wired ethernet"
                 : "Moderate latency - streaming over WiFi or internet?"
+        })
+    }
+    
+    if (decodeLatencyQuality !== "good" && decodeLatencyMs != null) {
+        issues.push({
+            metric: "Decode Time",
+            value: formatMs(decodeLatencyMs),
+            severity: decodeLatencyQuality,
+            suggestion: decodeLatencyQuality === "bad"
+                ? "Slow decoding - device may be underpowered or codec unsupported"
+                : "Decode time elevated - close other apps using hardware decoder"
         })
     }
     
@@ -236,17 +256,18 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
     }
     
     // Check if we have any latency data at all
-    const hasLatencyData = statsData.streamerRttMs != null || 
+    const hasLatencyData = rttMs != null || 
                            statsData.avgHostProcessingLatencyMs != null || 
-                           statsData.avgStreamerProcessingTimeMs != null
+                           statsData.avgStreamerProcessingTimeMs != null ||
+                           decodeLatencyMs != null
     
     // Build latency section only if we have data
     const latencySection = hasLatencyData ? `
     <div class="stats-section">
         <div class="stats-section-title">⏱️ Latency</div>
-        ${statsData.streamerRttMs != null ? `<div class="stats-row">
+        ${rttMs != null ? `<div class="stats-row">
             <span class="stats-label">RTT</span>
-            <span class="stats-value ${qualityClass(rttQuality)}">${formatMs(statsData.streamerRttMs)}</span>
+            <span class="stats-value ${qualityClass(rttQuality)}">${formatMs(rttMs)}</span>
         </div>` : ""}
         ${statsData.avgHostProcessingLatencyMs != null ? `<div class="stats-row">
             <span class="stats-label">Encode</span>
@@ -255,6 +276,10 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
         ${statsData.avgStreamerProcessingTimeMs != null ? `<div class="stats-row">
             <span class="stats-label">Streamer</span>
             <span class="stats-value ${qualityClass(streamerLatencyQuality)}">${formatMs(statsData.avgStreamerProcessingTimeMs)}</span>
+        </div>` : ""}
+        ${decodeLatencyMs != null ? `<div class="stats-row">
+            <span class="stats-label">Decode</span>
+            <span class="stats-value ${qualityClass(decodeLatencyQuality)}">${formatMs(decodeLatencyMs)}</span>
         </div>` : ""}
     </div>` : ""
 
