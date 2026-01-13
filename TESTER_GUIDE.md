@@ -7,10 +7,13 @@
 Extract `moonlight-web-server-win64.zip` to any folder. You'll get:
 ```
 moonlight-web-server/
-├── web-server.exe
+├── web-server.exe    (web UI & pairing)
+├── streamer.exe      (handles game streaming)
 └── dist/
     └── (frontend files)
 ```
+
+**Important:** Both `.exe` files must be in the same folder!
 
 ### 2. Start the Server
 
@@ -28,8 +31,26 @@ Make sure Sunshine (or GeForce Experience GameStream) is running on your PC with
 
 ### 4. Connect
 
-- **Browser:** Open http://localhost:8080 in Chrome/Edge
-- **Android App:** Connect using the hybrid streaming mode with your server's IP address
+- **Browser:** 
+- Open http://localhost:8080 in Chrome/Edge, if opening for the first time you will be prompted to create user credentials(suggest using something simple)
+- after login, host list will appear. to add new host click the + host icon
+- for Vanilla sunshine hosts enter: "localhost" with empty port
+- for backlight hosts enter: "localhost" with "48989" for port
+- all unpaired hosts will show in list with a locked icon 
+- to pair host, select it from the host list. Vanilla sunshine hosts will require PIN entry via sunshine webUI, backlight hosts should auto pair after selection
+
+- **Android App:** (local network only)
+- make sure server is running on host PC and open server web UI in browser
+- open backbone app to homescreen and navigate to PC Games row
+- select "Discovery PCs"
+- select host server from list with local IP address
+- if not paired or session expired, QR code scanner should display
+- select "QR code" from sevrer web UI on host browser, enter user password, qr code should appear
+- scan QR code within backbone app
+- on successful pair games list should appear for all paired hosts
+
+- To launch custom WebRTC fork streaming flow: launch PC game from PC discovery flow games list
+- To launch WebView streaming flow: launch PC game from either homescreen PC Games row, or PC game from library flow
 
 ---
 
