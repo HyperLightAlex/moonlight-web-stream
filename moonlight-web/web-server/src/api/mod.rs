@@ -127,6 +127,12 @@ fn attach_remote_access(
     remote_provider: &RemoteAccessProvider,
 ) -> DetailedHost {
     host.remote_access = remote_provider.get_info();
+    if let Some(ref ra) = host.remote_access {
+        log::info!("[Remote] Attaching remote_access to host response: external_ip={:?}, port={}, nat_type={}", 
+            ra.external_ip, ra.port, ra.nat_type);
+    } else {
+        log::info!("[Remote] No remote_access info available to attach");
+    }
     host
 }
 

@@ -8,14 +8,17 @@ use actix_web::{
     post,
     web::{Data, Json},
 };
-use common::api_bindings::PostLoginRequest;
+use common::api_bindings::{PostLoginRequest, PostLoginResponse};
 use futures::future::{Ready, ready};
 use std::{pin::Pin, time::Duration};
 
-use crate::app::{
-    App, AppError,
-    auth::{SessionToken, UserAuth},
-    user::{Admin, AuthenticatedUser},
+use crate::{
+    app::{
+        App, AppError,
+        auth::{SessionToken, UserAuth},
+        user::{Admin, AuthenticatedUser},
+    },
+    remote_access::RemoteAccessProvider,
 };
 
 pub const COOKIE_SESSION_TOKEN_NAME: &str = "mlSession";
@@ -112,6 +115,7 @@ impl FromRequest for Admin {
 #[post("/login")]
 async fn login(
     app: Data<App>,
+    remote_provider: Data<RemoteAccessProvider>,
     Json(request): Json<PostLoginRequest>,
 ) -> Result<HttpResponse, Error> {
     let user = if app.config().web_server.first_login_create_admin {
@@ -143,9 +147,22 @@ async fn login(
     let mut session_bytes = [0; _];
     let session_str = session.encode(&mut session_bytes);
 
+    // Get remote access info for the response
+    let remote_access = remote_provider.get_info();
+    
+    if let Some(ref ra) = remote_access {
+        log::info!("[Login] Returning remote_access: external_ip={:?}, port={}, nat_type={}", 
+            ra.external_ip, ra.port, ra.nat_type);
+    }
+
+    let response = PostLoginResponse {
+        session_token: session_str.to_string(),
+        remote_access,
+    };
+
     Ok(HttpResponse::Ok()
         .cookie(build_cookie(&app, session_expiration, session_str))
-        .finish())
+        .json(response))
 }
 
 #[post("/logout")]
@@ -196,7 +213,19 @@ pub fn build_cookie<'a>(app: &'a App, expiration: Duration, session_str: &'a str
         .finish()
 }
 
+/// Response from authenticate endpoint
+#[derive(serde::Serialize)]
+struct AuthenticateResponse {
+    remote_access: Option<common::api_bindings::RemoteAccessInfo>,
+}
+
 #[get("/authenticate")]
-async fn authenticate(_user: AuthenticatedUser) -> HttpResponse {
-    HttpResponse::Ok().finish()
+async fn authenticate(
+    _user: AuthenticatedUser,
+    remote_provider: Data<RemoteAccessProvider>,
+) -> HttpResponse {
+    let response = AuthenticateResponse {
+        remote_access: remote_provider.get_info(),
+    };
+    HttpResponse::Ok().json(response)
 }

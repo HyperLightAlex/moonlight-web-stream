@@ -170,7 +170,7 @@ If you see old behavior after deploying, the issue is likely:
 
 ## Creating Distribution Packages
 
-To package the web server for distribution:
+To package the web server for distribution to testers:
 
 ```powershell
 cd C:\path\to\moonlight-web-stream
@@ -182,19 +182,57 @@ Remove-Item -Recurse -Force "package" -ErrorAction SilentlyContinue
 # Create package directory
 New-Item -ItemType Directory -Force -Path "package\moonlight-web-server" | Out-Null
 
-# Copy executable and frontend
+# Copy executables and frontend
 Copy-Item "target\debug\web-server.exe" "package\moonlight-web-server\"
+Copy-Item "target\debug\streamer.exe" "package\moonlight-web-server\"
 Copy-Item -Recurse "target\debug\dist" "package\moonlight-web-server\"
 
 # Create zip archive
 Compress-Archive -Path "package\moonlight-web-server\*" -DestinationPath "moonlight-web-server-win64.zip" -Force
+
+Write-Host "Package created: moonlight-web-server-win64.zip"
+Get-ChildItem "package\moonlight-web-server\*.exe" | Select-Object Name, Length
 ```
 
 The resulting `moonlight-web-server-win64.zip` contains:
-- `web-server.exe` - The server executable
-- `dist/` - All frontend assets (HTML, JS, CSS)
+
+| File | Purpose |
+|------|---------|
+| `web-server.exe` | Main server (web UI, pairing, API) |
+| `streamer.exe` | Game streaming process (spawned by web-server) |
+| `dist/` | Frontend assets (HTML, JS, CSS) |
+
+> ⚠️ **IMPORTANT:** Both executables must be in the same folder! The web server spawns `streamer.exe` when launching a stream.
 
 > **Note:** The `package/` folder and `*.zip` files are excluded from git (see `.gitignore`).
+
+### Quick Package Script
+
+Save this as `package.ps1` in the project root:
+
+```powershell
+# package.ps1 - Create distribution package for testers
+
+$ErrorActionPreference = "Stop"
+
+# Clean up
+Remove-Item -Force "moonlight-web-server-win64.zip" -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force "package" -ErrorAction SilentlyContinue
+
+# Create package
+New-Item -ItemType Directory -Force -Path "package\moonlight-web-server" | Out-Null
+Copy-Item "target\debug\web-server.exe" "package\moonlight-web-server\"
+Copy-Item "target\debug\streamer.exe" "package\moonlight-web-server\"
+Copy-Item -Recurse "target\debug\dist" "package\moonlight-web-server\"
+
+# Create zip
+Compress-Archive -Path "package\moonlight-web-server\*" -DestinationPath "moonlight-web-server-win64.zip" -Force
+
+# Report
+$size = [math]::Round((Get-Item "moonlight-web-server-win64.zip").Length / 1MB, 1)
+Write-Host "`nPackage created: moonlight-web-server-win64.zip ($size MB)" -ForegroundColor Green
+Get-ChildItem "package\moonlight-web-server" | Format-Table Name, @{N='Size (MB)';E={[math]::Round($_.Length/1MB,1)}}
+```
 
 ---
 

@@ -27,6 +27,16 @@ pub struct PostLoginRequest {
     pub password: String,
 }
 
+/// Response from login endpoint, includes server remote access info
+#[derive(Serialize, Deserialize, Debug, TS, Clone)]
+#[ts(export, export_to = EXPORT_PATH)]
+pub struct PostLoginResponse {
+    /// Session token (also set as cookie)
+    pub session_token: String,
+    /// Remote access info for connecting to this server from the internet
+    pub remote_access: Option<RemoteAccessInfo>,
+}
+
 #[derive(Serialize, Deserialize, Debug, TS, Clone, Copy)]
 #[ts(export, export_to = EXPORT_PATH)]
 pub enum HostState {
