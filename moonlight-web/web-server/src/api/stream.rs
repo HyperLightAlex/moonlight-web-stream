@@ -247,6 +247,15 @@ pub async fn start_host(
         )
         .await;
 
+        // Clean up any orphaned streamer processes before starting a new one
+        // This handles edge cases where previous streamers weren't properly killed
+        {
+            use crate::app::streamer_manager::streamer_manager;
+            
+            info!("[Stream]: Cleaning up orphaned streamers before starting new session...");
+            streamer_manager().cleanup_before_new_session().await;
+        }
+
         // Spawn child
         let (mut child, stdin, stdout) = match Command::new(&web_app.config().streamer_path)
             .stdin(Stdio::piped())
@@ -283,6 +292,13 @@ pub async fn start_host(
                 return;
             }
         };
+
+        // Register the streamer process for tracking
+        let child_pid = child.id();
+        {
+            use crate::app::streamer_manager::streamer_manager;
+            streamer_manager().register(&child, hybrid_session_id.clone()).await;
+        }
 
         // Create ipc
         let (mut ipc_sender, mut ipc_receiver) = create_child_ipc::<
@@ -458,9 +474,19 @@ pub async fn start_host(
                 warn!("failed to close streamer web socket: {err}");
             }
 
-            // kill the streamer
-            if let Err(err) = child.kill().await {
-                warn!("failed to kill streamer child: {err}");
+            // kill the streamer and unregister from manager
+            {
+                use crate::app::streamer_manager::streamer_manager;
+                
+                if let Err(err) = child.kill().await {
+                    warn!("failed to kill streamer child: {err}");
+                }
+                
+                // Unregister from process manager
+                if let Some(pid) = child_pid {
+                    streamer_manager().unregister(pid).await;
+                    info!("[Stream]: Unregistered streamer process PID {}", pid);
+                }
             }
         });
 

@@ -33,6 +33,7 @@ pub mod host;
 pub mod password;
 pub mod session;
 pub mod storage;
+pub mod streamer_manager;
 pub mod user;
 
 #[derive(Debug, Error)]

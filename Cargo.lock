@@ -4025,6 +4025,7 @@ dependencies = [
  "futures",
  "hex",
  "igd-next",
+ "lazy_static",
  "log",
  "moonlight-common",
  "openssl",
