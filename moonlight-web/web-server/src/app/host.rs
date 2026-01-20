@@ -766,6 +766,9 @@ impl Host {
         app_id: AppId,
         force_refresh: bool,
     ) -> Result<Bytes, AppError> {
+        use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
+        use log::debug;
+
         self.can_use(user).await?;
 
         // TODO: apollo doesn't like this for some reason
@@ -786,6 +789,75 @@ impl Host {
             }
         }
 
+        // Try Fuji's internal API first when embedded in Fuji
+        // This provides access to IGDB-enriched cover art
+        if is_embedded_in_fuji().await {
+            debug!("Embedded in Fuji, trying internal API for app image");
+
+            // First get the app list to find the app name for this app_id
+            let apps_result = self
+                .use_client(
+                    &app,
+                    user,
+                    false,
+                    async |_this, https_capable, client, host, _port, client_info| {
+                        if !https_capable {
+                            return Err(AppError::HostNotPaired);
+                        }
+
+                        let apps = host_app_list(
+                            client,
+                            &Self::build_hostport(host, info.https_port),
+                            client_info,
+                        )
+                        .await?;
+
+                        Ok(apps)
+                    },
+                )
+                .await?;
+
+            if let Ok(apps) = apps_result {
+                // Find the app by ID to get its name
+                if let Some(sunshine_app) = apps.apps.iter().find(|a| a.id == app_id.0) {
+                    let app_name = &sunshine_app.name;
+                    debug!("Found app name '{}' for app_id {}", app_name, app_id.0);
+
+                    // Get games from Fuji and find by name
+                    if let Ok(fuji_games) = fuji_client().get_games(None, None).await {
+                        // Find matching game by name (case-insensitive)
+                        let matching_game = fuji_games.games.iter().find(|g| {
+                            g.title.to_lowercase() == app_name.to_lowercase()
+                        });
+
+                        if let Some(game) = matching_game {
+                            debug!("Found matching Fuji game: {} -> {}", app_name, game.id);
+
+                            // Fetch cover from Fuji's internal API
+                            if let Ok(cover_bytes) = fuji_client().get_game_cover(&game.id, Some("large")).await {
+                                let app_image = Bytes::from(cover_bytes);
+
+                                // Cache it
+                                {
+                                    let mut app_images = app.app_image_cache.write().await;
+                                    app_images.insert(cache_key, app_image.clone());
+                                }
+
+                                return Ok(app_image);
+                            } else {
+                                debug!("Fuji internal API returned no cover for game {}", game.id);
+                            }
+                        } else {
+                            debug!("No matching Fuji game found for '{}'", app_name);
+                        }
+                    }
+                }
+            }
+
+            debug!("Fuji internal API didn't provide cover, falling back to Sunshine");
+        }
+
+        // Fall back to Sunshine's box art endpoint
         let app_image = self
             .use_client(
                 &app,

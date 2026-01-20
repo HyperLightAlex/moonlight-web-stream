@@ -11,6 +11,7 @@ common = { path = "../common" }
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "macros"] }
 reqwest = { workspace = true, features = ["native-tls", "json"] }
 urlencoding = "2.1"
+lazy_static = "1.5"
 
 clap = { workspace = true, features = ["derive", "env"] }
 

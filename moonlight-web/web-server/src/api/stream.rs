@@ -193,6 +193,51 @@ pub async fn start_host(
         )
         .await;
 
+        // -- Launch game via Fuji internal API (when embedded)
+        // This handles platform-aware launching (Steam, Epic, Xbox, etc.)
+        {
+            use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
+
+            if is_embedded_in_fuji().await {
+                info!("[Stream]: Embedded in Fuji, launching game via internal API");
+
+                let _ = send_ws_message(
+                    &mut session,
+                    StreamServerMessage::StageStarting {
+                        stage: "Launching Game".to_string(),
+                    },
+                )
+                .await;
+
+                // Get games from Fuji to find the matching game
+                if let Ok(fuji_games) = fuji_client().get_games(None, None).await {
+                    // Find matching game by name (case-insensitive)
+                    let matching_game = fuji_games.games.iter().find(|g| {
+                        g.title.to_lowercase() == app.title.to_lowercase()
+                    });
+
+                    if let Some(game) = matching_game {
+                        info!("[Stream]: Found Fuji game '{}' -> launching...", game.id);
+
+                        match fuji_client().launch_game(&game.id, true).await {
+                            Ok(response) => {
+                                if response.success {
+                                    info!("[Stream]: Game launched successfully via Fuji, session: {:?}", response.session_id);
+                                } else {
+                                    warn!("[Stream]: Fuji launch returned non-success: {:?}", response.error);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("[Stream]: Fuji game launch failed: {:?}, continuing with stream anyway", e);
+                            }
+                        }
+                    } else {
+                        debug!("[Stream]: No matching Fuji game for '{}', Sunshine will handle launch", app.title);
+                    }
+                }
+            }
+        }
+
         // -- Starting stage: launch streamer
         let _ = send_ws_message(
             &mut session,
@@ -465,10 +510,24 @@ pub async fn cancel_host(
     mut user: AuthenticatedUser,
     Json(request): Json<PostCancelRequest>,
 ) -> Result<Json<PostCancelResponse>, AppError> {
+    use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
+
     let host_id = HostId(request.host_id);
 
     let mut host = user.host(host_id).await?;
 
+    // When embedded in Fuji, also stop the game via internal API
+    // This ensures proper game termination for platform-specific games
+    if is_embedded_in_fuji().await {
+        info!("[Stream]: Embedded in Fuji, ending session via internal API");
+
+        // End the session which will stop any running game
+        if let Err(e) = fuji_client().end_session().await {
+            warn!("[Stream]: Fuji session end failed: {:?}", e);
+        }
+    }
+
+    // Cancel via Sunshine as well (this stops the stream)
     host.cancel_app(&mut user).await?;
 
     Ok(Json(PostCancelResponse { success: true }))

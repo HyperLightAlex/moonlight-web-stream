@@ -28,6 +28,7 @@ use crate::app::{
 
 pub mod auth;
 pub mod fuji;
+pub mod fuji_internal;
 pub mod host;
 pub mod password;
 pub mod session;
