@@ -820,7 +820,7 @@ impl Host {
             if let Ok(apps) = apps_result {
                 // Find the app by ID to get its name
                 if let Some(sunshine_app) = apps.apps.iter().find(|a| a.id == app_id.0) {
-                    let app_name = &sunshine_app.name;
+                    let app_name = &sunshine_app.title;
                     debug!("Found app name '{}' for app_id {}", app_name, app_id.0);
 
                     // Get games from Fuji and find by name

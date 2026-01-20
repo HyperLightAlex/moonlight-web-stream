@@ -186,6 +186,9 @@ pub async fn start_host(
             }
         };
 
+        // Store app title before moving app into message
+        let app_title = app.title.clone();
+
         // -- Send App info
         let _ = send_ws_message(
             &mut session,
@@ -213,7 +216,7 @@ pub async fn start_host(
                 if let Ok(fuji_games) = fuji_client().get_games(None, None).await {
                     // Find matching game by name (case-insensitive)
                     let matching_game = fuji_games.games.iter().find(|g| {
-                        g.title.to_lowercase() == app.title.to_lowercase()
+                        g.title.to_lowercase() == app_title.to_lowercase()
                     });
 
                     if let Some(game) = matching_game {
@@ -232,7 +235,7 @@ pub async fn start_host(
                             }
                         }
                     } else {
-                        debug!("[Stream]: No matching Fuji game for '{}', Sunshine will handle launch", app.title);
+                        debug!("[Stream]: No matching Fuji game for '{}', Sunshine will handle launch", app_title);
                     }
                 }
             }
