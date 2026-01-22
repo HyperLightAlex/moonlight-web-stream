@@ -91,6 +91,20 @@ pub struct FujiGamesResponse {
     pub last_scan_time: Option<String>,
 }
 
+/// Sunshine app (from Fuji's proxy to Sunshine)
+#[derive(Debug, Deserialize)]
+pub struct SunshineApp {
+    pub id: u32,
+    pub title: String,
+    pub is_hdr_supported: bool,
+}
+
+/// Sunshine apps list response (from Fuji's proxy endpoint)
+#[derive(Debug, Deserialize)]
+pub struct SunshineAppsResponse {
+    pub apps: Vec<SunshineApp>,
+}
+
 /// Game launch request
 #[derive(Debug, Serialize)]
 pub struct LaunchRequest {
@@ -211,7 +225,11 @@ pub struct FujiStatus {
 pub struct SunshineStatus {
     pub running: bool,
     pub version: Option<String>,
-    pub port: u16,
+    pub port: u16,  // Legacy field
+    #[serde(rename = "httpPort")]
+    pub http_port: Option<u16>,
+    #[serde(rename = "httpsPort")]
+    pub https_port: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,6 +306,38 @@ impl FujiInternalClient {
 
         let status: FujiStatus = response.json().await?;
         Ok(status)
+    }
+
+    /// Get current Sunshine ports from Fuji
+    /// Returns (http_port, https_port)
+    pub async fn get_sunshine_ports(&self) -> Result<(u16, u16), FujiInternalError> {
+        let status = self.get_status().await?;
+        let http_port = status.sunshine.http_port.unwrap_or(status.sunshine.port);
+        let https_port = status.sunshine.https_port.unwrap_or(http_port + 1);
+        info!("[Fuji] Got Sunshine ports - HTTP: {}, HTTPS: {}", http_port, https_port);
+        Ok((http_port, https_port))
+    }
+
+    /// Get Sunshine apps list via Fuji (uses correct dynamic port)
+    pub async fn get_sunshine_apps(&self) -> Result<SunshineAppsResponse, FujiInternalError> {
+        let url = format!("{}/sunshine/apps", self.base_url);
+        
+        info!("[Fuji] Getting Sunshine apps via internal API");
+        
+        let response = self.client.get(&url).send().await?;
+        
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("[Fuji] Get Sunshine apps failed: {} - {}", status, body);
+            return Err(FujiInternalError::ApiError(
+                format!("Get Sunshine apps failed: {} - {}", status, body)
+            ));
+        }
+
+        let apps: SunshineAppsResponse = response.json().await?;
+        info!("[Fuji] Got {} Sunshine apps", apps.apps.len());
+        Ok(apps)
     }
 
     /// Get list of games from Fuji

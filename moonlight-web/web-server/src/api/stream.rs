@@ -165,7 +165,7 @@ pub async fn start_host(
             return;
         };
 
-        let (address, http_port) = match host.address_port(&mut user).await {
+        let (address, mut http_port) = match host.address_port(&mut user).await {
             Ok(address_port) => address_port,
             Err(err) => {
                 warn!("failed to start stream for host {host_id:?} (at get address_port): {err:?}");
@@ -176,6 +176,25 @@ pub async fn start_host(
                 return;
             }
         };
+
+        // When embedded in Fuji, get fresh Sunshine port (it may have changed since pairing)
+        {
+            use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
+            
+            if is_embedded_in_fuji().await {
+                match fuji_client().get_sunshine_ports().await {
+                    Ok((fresh_http_port, _)) => {
+                        if fresh_http_port != http_port {
+                            info!("[Stream]: Sunshine HTTP port changed {} -> {}", http_port, fresh_http_port);
+                        }
+                        http_port = fresh_http_port;
+                    }
+                    Err(e) => {
+                        warn!("[Stream]: Failed to get fresh Sunshine ports: {:?}, using stored {}", e, http_port);
+                    }
+                }
+            }
+        }
 
         let pair_info = match host.pair_info(&mut user).await {
             Ok(pair_info) => pair_info,

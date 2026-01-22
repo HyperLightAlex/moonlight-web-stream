@@ -329,10 +329,39 @@ async fn get_apps(
     mut user: AuthenticatedUser,
     Query(query): Query<GetAppsQuery>,
 ) -> Result<Json<GetAppsResponse>, AppError> {
+    use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
+    use log::info;
+
     let host_id = HostId(query.host_id);
 
-    let mut host = user.host(host_id).await?;
+    // When embedded in Fuji, get apps via Fuji's proxy to Sunshine
+    // This ensures we use the correct dynamic Sunshine ports
+    if is_embedded_in_fuji().await {
+        info!("[Apps]: Embedded in Fuji, getting Sunshine apps via internal API");
+        
+        match fuji_client().get_sunshine_apps().await {
+            Ok(sunshine_apps) => {
+                info!("[Apps]: Got {} Sunshine apps via Fuji", sunshine_apps.apps.len());
+                return Ok(Json(GetAppsResponse {
+                    apps: sunshine_apps.apps
+                        .into_iter()
+                        .map(|app| api_bindings::App {
+                            app_id: app.id,
+                            title: app.title,
+                            is_hdr_supported: app.is_hdr_supported,
+                        })
+                        .collect(),
+                }));
+            }
+            Err(e) => {
+                warn!("[Apps]: Failed to get Sunshine apps via Fuji: {:?}, falling back to direct", e);
+                // Fall through to direct Sunshine query
+            }
+        }
+    }
 
+    // Fallback: query Sunshine directly (non-Fuji mode)
+    let mut host = user.host(host_id).await?;
     let apps = host.list_apps(&mut user).await?;
 
     Ok(Json(GetAppsResponse {
