@@ -331,30 +331,41 @@ async fn get_apps(
 ) -> Result<Json<GetAppsResponse>, AppError> {
     use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
     use log::info;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     let host_id = HostId(query.host_id);
 
-    // When embedded in Fuji, get apps via Fuji's proxy to Sunshine
-    // This ensures we use the correct dynamic Sunshine ports
+    // When embedded in Fuji, return Fuji's game library (not Sunshine's app list)
+    // Fuji has the full scanned game library from all platforms
     if is_embedded_in_fuji().await {
-        info!("[Apps]: Embedded in Fuji, getting Sunshine apps via internal API");
+        info!("[Apps]: Embedded in Fuji, getting games from Fuji's library");
         
-        match fuji_client().get_sunshine_apps().await {
-            Ok(sunshine_apps) => {
-                info!("[Apps]: Got {} Sunshine apps via Fuji", sunshine_apps.apps.len());
+        match fuji_client().get_games(None, None).await {
+            Ok(fuji_games) => {
+                info!("[Apps]: Got {} games from Fuji", fuji_games.games.len());
                 return Ok(Json(GetAppsResponse {
-                    apps: sunshine_apps.apps
+                    apps: fuji_games.games
                         .into_iter()
-                        .map(|app| api_bindings::App {
-                            app_id: app.id,
-                            title: app.title,
-                            is_hdr_supported: app.is_hdr_supported,
+                        .map(|game| {
+                            // Generate a consistent numeric app_id from the game title
+                            // This is used by the client to request streams
+                            // The streaming endpoint will match back by title
+                            let mut hasher = DefaultHasher::new();
+                            game.title.hash(&mut hasher);
+                            let app_id = (hasher.finish() & 0x7FFFFFFF) as u32; // Keep positive
+                            
+                            api_bindings::App {
+                                app_id,
+                                title: game.title,
+                                is_hdr_supported: false, // Fuji doesn't track HDR per-game
+                            }
                         })
                         .collect(),
                 }));
             }
             Err(e) => {
-                warn!("[Apps]: Failed to get Sunshine apps via Fuji: {:?}, falling back to direct", e);
+                warn!("[Apps]: Failed to get games from Fuji: {:?}, falling back to Sunshine", e);
                 // Fall through to direct Sunshine query
             }
         }

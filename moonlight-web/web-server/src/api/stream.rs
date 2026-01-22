@@ -21,15 +21,15 @@ use moonlight_common::stream::bindings::SupportedVideoFormats;
 use tokio::{process::Command, spawn};
 
 use crate::app::{
-    App, AppError,
-    host::{AppId, HostId},
+    App as WebApp, AppError,
+    host::{App, AppId, HostId},
     session::{InputToStreamerMessage, SessionEvent},
     user::AuthenticatedUser,
 };
 
 #[get("/host/stream")]
 pub async fn start_host(
-    web_app: Data<App>,
+    web_app: Data<WebApp>,
     mut user: AuthenticatedUser,
     request: HttpRequest,
     payload: Payload,
@@ -145,25 +145,90 @@ pub async fn start_host(
             }
         };
 
-        let apps = match host.list_apps(&mut user).await {
-            Ok(apps) => apps,
-            Err(err) => {
-                warn!("failed to start stream for host {host_id:?} (at list_apps): {err:?}");
+        // When embedded in Fuji, look up the game from Fuji's library
+        // The app_id is a hash of the game title (generated in /api/apps)
+        // When not embedded, use Sunshine's app list directly
+        let app: App;
+        let mut fuji_game_id_early: Option<String> = None;
+        
+        {
+            use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            
+            if is_embedded_in_fuji().await {
+                info!("[Stream]: Looking up game from Fuji's library (app_id={})", app_id.0);
+                
+                match fuji_client().get_games(None, None).await {
+                    Ok(fuji_games) => {
+                        // Find the game by matching the hashed title
+                        let found_game = fuji_games.games.into_iter().find(|game| {
+                            let mut hasher = DefaultHasher::new();
+                            game.title.hash(&mut hasher);
+                            let hashed_id = (hasher.finish() & 0x7FFFFFFF) as u32;
+                            hashed_id == app_id.0
+                        });
+                        
+                        if let Some(game) = found_game {
+                            info!("[Stream]: Found Fuji game: '{}' (id={})", game.title, game.id);
+                            fuji_game_id_early = Some(game.id.clone());
+                            
+                            // Create a synthetic App for the rest of the flow
+                            app = App {
+                                id: AppId(app_id.0),
+                                title: game.title,
+                                is_hdr_supported: false,
+                            };
+                        } else {
+                            warn!("[Stream]: Game not found in Fuji library for app_id={}", app_id.0);
+                            let _ = send_ws_message(&mut session, StreamServerMessage::AppNotFound).await;
+                            let _ = session.close(None).await;
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("[Stream]: Failed to get Fuji games: {:?}, falling back to Sunshine", e);
+                        // Fall through to Sunshine lookup below
+                        let apps = match host.list_apps(&mut user).await {
+                            Ok(apps) => apps,
+                            Err(err) => {
+                                warn!("failed to start stream for host {host_id:?} (at list_apps): {err:?}");
+                                let _ = send_ws_message(&mut session, StreamServerMessage::InternalServerError).await;
+                                let _ = session.close(None).await;
+                                return;
+                            }
+                        };
+                        
+                        let Some(found_app) = apps.into_iter().find(|a| a.id == app_id) else {
+                            warn!("failed to start stream for host {host_id:?} because the app couldn't be found!");
+                            let _ = send_ws_message(&mut session, StreamServerMessage::AppNotFound).await;
+                            let _ = session.close(None).await;
+                            return;
+                        };
+                        app = found_app;
+                    }
+                }
+            } else {
+                // Not embedded - use Sunshine's app list directly
+                let apps = match host.list_apps(&mut user).await {
+                    Ok(apps) => apps,
+                    Err(err) => {
+                        warn!("failed to start stream for host {host_id:?} (at list_apps): {err:?}");
+                        let _ = send_ws_message(&mut session, StreamServerMessage::InternalServerError).await;
+                        let _ = session.close(None).await;
+                        return;
+                    }
+                };
 
-                let _ =
-                    send_ws_message(&mut session, StreamServerMessage::InternalServerError).await;
-                let _ = session.close(None).await;
-                return;
+                let Some(found_app) = apps.into_iter().find(|a| a.id == app_id) else {
+                    warn!("failed to start stream for host {host_id:?} because the app couldn't be found!");
+                    let _ = send_ws_message(&mut session, StreamServerMessage::AppNotFound).await;
+                    let _ = session.close(None).await;
+                    return;
+                };
+                app = found_app;
             }
-        };
-
-        let Some(app) = apps.into_iter().find(|app| app.id == app_id) else {
-            warn!("failed to start stream for host {host_id:?} because the app couldn't be found!");
-
-            let _ = send_ws_message(&mut session, StreamServerMessage::AppNotFound).await;
-            let _ = session.close(None).await;
-            return;
-        };
+        }
 
         let (address, mut http_port) = match host.address_port(&mut user).await {
             Ok(address_port) => address_port,
@@ -219,7 +284,7 @@ pub async fn start_host(
         // 3. Return "launch" or "resume" action
         // The streamer will then execute exactly what Fuji decided.
         let mut launch_mode: Option<String> = None;
-        let mut fuji_game_id: Option<String> = None;
+        let mut fuji_game_id: Option<String> = fuji_game_id_early; // Use ID found during app lookup
         
         {
             use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
@@ -231,64 +296,63 @@ pub async fn start_host(
             if embedded {
                 info!("[Stream]: Embedded in Fuji, using stream orchestration");
 
-                // First, find the Fuji game ID by matching app title
-                info!("[Stream]: Looking up Fuji game ID for '{}'...", app_title);
-                match fuji_client().get_games(None, None).await {
-                    Ok(fuji_games) => {
-                        let matching_game = fuji_games.games.iter().find(|g| {
+                // Use the game ID found during app lookup (or find it now as fallback)
+                if fuji_game_id.is_none() {
+                    info!("[Stream]: Looking up Fuji game ID for '{}'...", app_title);
+                    if let Ok(fuji_games) = fuji_client().get_games(None, None).await {
+                        if let Some(game) = fuji_games.games.iter().find(|g| {
                             g.title.to_lowercase() == app_title.to_lowercase()
-                        });
-
-                        if let Some(game) = matching_game {
+                        }) {
                             fuji_game_id = Some(game.id.clone());
                             info!("[Stream]: Found Fuji game '{}' (id={})", game.title, game.id);
-
-                            // Call Fuji's stream orchestration endpoint
-                            // This handles cancel if needed and returns the action
-                            let _ = send_ws_message(
-                                &mut session,
-                                StreamServerMessage::StageStarting {
-                                    stage: "Preparing Stream".to_string(),
-                                },
-                            )
-                            .await;
-
-                            match fuji_client().stream_launch(&game.id).await {
-                                Ok(response) => {
-                                    if response.success {
-                                        if let Some(action) = &response.action {
-                                            launch_mode = Some(action.clone());
-                                            info!(
-                                                "[Stream]: Fuji orchestration decided: action={}, cancelledPrevious={:?}",
-                                                action,
-                                                response.cancelled_previous
-                                            );
-
-                                            if response.cancelled_previous.unwrap_or(false) {
-                                                let _ = send_ws_message(
-                                                    &mut session,
-                                                    StreamServerMessage::StageComplete {
-                                                        stage: "Stopped Previous Game".to_string(),
-                                                    },
-                                                )
-                                                .await;
-                                            }
-                                        }
-                                    } else {
-                                        warn!("[Stream]: Fuji orchestration failed: {:?}", response.error);
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("[Stream]: Fuji stream orchestration failed: {:?}, streamer will decide", e);
-                                }
-                            }
-                        } else {
-                            warn!("[Stream]: No matching Fuji game for '{}', streamer will decide launch mode", app_title);
                         }
                     }
-                    Err(e) => {
-                        error!("[Stream]: Failed to get games from Fuji: {:?}, streamer will decide", e);
+                }
+
+                if let Some(ref game_id) = fuji_game_id {
+                    info!("[Stream]: Using Fuji game ID: {}", game_id);
+
+                    // Call Fuji's stream orchestration endpoint
+                    // This handles cancel if needed and returns the action
+                    let _ = send_ws_message(
+                        &mut session,
+                        StreamServerMessage::StageStarting {
+                            stage: "Preparing Stream".to_string(),
+                        },
+                    )
+                    .await;
+
+                    match fuji_client().stream_launch(game_id).await {
+                        Ok(response) => {
+                            if response.success {
+                                if let Some(action) = &response.action {
+                                    launch_mode = Some(action.clone());
+                                    info!(
+                                        "[Stream]: Fuji orchestration decided: action={}, cancelledPrevious={:?}",
+                                        action,
+                                        response.cancelled_previous
+                                    );
+
+                                    if response.cancelled_previous.unwrap_or(false) {
+                                        let _ = send_ws_message(
+                                            &mut session,
+                                            StreamServerMessage::StageComplete {
+                                                stage: "Stopped Previous Game".to_string(),
+                                            },
+                                        )
+                                        .await;
+                                    }
+                                }
+                            } else {
+                                warn!("[Stream]: Fuji orchestration failed: {:?}", response.error);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("[Stream]: Fuji stream orchestration failed: {:?}, streamer will decide", e);
+                        }
                     }
+                } else {
+                    warn!("[Stream]: No Fuji game ID available, streamer will decide launch mode");
                 }
 
                 let _ = send_ws_message(
