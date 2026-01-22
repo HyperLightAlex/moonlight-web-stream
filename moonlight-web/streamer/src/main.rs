@@ -93,6 +93,7 @@ async fn main() {
         server_certificate,
         app_id,
         session_token,
+        launch_mode,
     ) = loop {
         match ipc_receiver.recv().await {
             Some(ServerIpcMessage::Init {
@@ -106,6 +107,7 @@ async fn main() {
                 server_certificate,
                 app_id,
                 session_token,
+                launch_mode,
             }) => {
                 debug!(
                     "Client supported codecs: {:?}",
@@ -114,6 +116,12 @@ async fn main() {
                         .iter_names()
                         .collect::<Vec<_>>()
                 );
+                
+                if let Some(ref mode) = launch_mode {
+                    info!("[Streamer]: Received launch_mode from server: {}", mode);
+                } else {
+                    info!("[Streamer]: No launch_mode provided, will check current_game");
+                }
 
                 break (
                     config,
@@ -126,6 +134,7 @@ async fn main() {
                     server_certificate,
                     app_id,
                     session_token,
+                    launch_mode,
                 );
             }
             _ => continue,
@@ -174,6 +183,7 @@ async fn main() {
         StreamInfo {
             host: Mutex::new(host),
             app_id,
+            launch_mode,
         },
         stream_settings,
         ipc_sender.clone(),
@@ -212,6 +222,9 @@ async fn main() {
 struct StreamInfo {
     host: Mutex<MoonlightHost<RequestClient>>,
     app_id: u32,
+    /// Launch mode: "launch" or "resume", determined by Fuji orchestrator
+    /// If None, streamer checks current_game (legacy behavior)
+    launch_mode: Option<String>,
 }
 
 struct StreamConnection {
@@ -341,7 +354,8 @@ impl StreamConnection {
                     };
 
                     if let ServerIpcMessage::Stop = &message {
-                        this.on_ipc_message(ServerIpcMessage::Stop).await;
+                        info!("[Stream]: Received stop signal from web server, initiating graceful shutdown");
+                        this.stop().await;
                         return;
                     }
 
@@ -560,9 +574,14 @@ impl StreamConnection {
             stream: Arc::downgrade(self),
         };
 
+        // Pass launch_mode to host.start_stream
+        // If provided by Fuji, streamer will use it; otherwise falls back to checking current_game
+        let launch_mode_ref = self.info.launch_mode.as_deref();
+        
         let stream = match host
             .start_stream(
                 &self.moonlight,
+                launch_mode_ref,
                 self.info.app_id,
                 self.settings.width,
                 self.settings.height,

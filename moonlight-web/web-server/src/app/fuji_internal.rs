@@ -137,6 +137,47 @@ pub struct StopResponse {
     pub error: Option<String>,
 }
 
+/// Stream launch request (for orchestration endpoint)
+#[derive(Debug, Serialize)]
+pub struct StreamLaunchRequest {
+    #[serde(rename = "gameId")]
+    pub game_id: String,
+}
+
+/// Stream launch response (from orchestration endpoint)
+#[derive(Debug, Deserialize)]
+pub struct StreamLaunchResponse {
+    pub success: bool,
+    /// "launch" or "resume"
+    pub action: Option<String>,
+    /// True if a previous game was cancelled before launching this one
+    #[serde(rename = "cancelledPrevious")]
+    pub cancelled_previous: Option<bool>,
+    /// Sunshine app index (for /launch or /resume calls)
+    #[serde(rename = "appIndex")]
+    pub app_index: Option<u32>,
+    /// Game info
+    pub game: Option<StreamLaunchGameInfo>,
+    /// Error message if success is false
+    pub error: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamLaunchGameInfo {
+    pub id: String,
+    pub title: String,
+    #[serde(rename = "sunshineAppId")]
+    pub sunshine_app_id: Option<u32>,
+}
+
+/// Stream started notification request
+#[derive(Debug, Serialize)]
+pub struct StreamStartedRequest {
+    #[serde(rename = "gameId")]
+    pub game_id: String,
+}
+
 /// Session response
 #[derive(Debug, Deserialize)]
 pub struct SessionResponse {
@@ -425,6 +466,105 @@ impl FujiInternalClient {
         }
 
         Ok(())
+    }
+
+    /// Launch stream via orchestration endpoint (NEW - Fuji handles cancel/launch decision)
+    /// 
+    /// This is the main entry point for starting a stream. Fuji will:
+    /// 1. Check if a different game is running
+    /// 2. Cancel the previous game if needed
+    /// 3. Return whether to "launch" or "resume"
+    /// 
+    /// The web server should pass this `action` to the streamer.
+    pub async fn stream_launch(&self, game_id: &str) -> Result<StreamLaunchResponse, FujiInternalError> {
+        let url = format!("{}/stream/launch", self.base_url);
+        
+        let request = StreamLaunchRequest { 
+            game_id: game_id.to_string() 
+        };
+
+        info!("[Fuji] Calling stream orchestration for game: {}", game_id);
+
+        let response = self.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(FujiInternalError::GameNotFound(game_id.to_string()));
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("[Fuji] Stream launch failed: {} - {}", status, body);
+            return Err(FujiInternalError::LaunchFailed(body));
+        }
+
+        let launch_response: StreamLaunchResponse = response.json().await?;
+        
+        if launch_response.success {
+            info!(
+                "[Fuji] Stream orchestration result: action={:?}, appIndex={:?}, cancelledPrevious={:?}", 
+                launch_response.action,
+                launch_response.app_index,
+                launch_response.cancelled_previous
+            );
+        } else {
+            warn!("[Fuji] Stream orchestration failed: {:?}", launch_response.error);
+        }
+
+        Ok(launch_response)
+    }
+
+    /// Notify Fuji that the stream has started successfully
+    pub async fn stream_started(&self, game_id: &str) -> Result<(), FujiInternalError> {
+        let url = format!("{}/stream/started", self.base_url);
+        
+        let request = StreamStartedRequest { 
+            game_id: game_id.to_string() 
+        };
+
+        info!("[Fuji] Notifying stream started for game: {}", game_id);
+
+        let response = self.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            warn!("[Fuji] Stream started notification failed: {} - {}", status, body);
+        }
+
+        Ok(())
+    }
+
+    /// Stop the current stream (calls new stream/stop endpoint)
+    pub async fn stream_stop(&self) -> Result<StopResponse, FujiInternalError> {
+        let url = format!("{}/stream/stop", self.base_url);
+
+        info!("[Fuji] Stopping stream via orchestration API");
+
+        let response = self.client
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(FujiInternalError::ApiError(
+                format!("Stream stop failed: {} - {}", status, body)
+            ));
+        }
+
+        let stop_response: StopResponse = response.json().await?;
+        Ok(stop_response)
     }
 }
 

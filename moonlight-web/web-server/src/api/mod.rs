@@ -390,6 +390,9 @@ pub fn api_service() -> impl HttpServiceFactory {
             // -- Stream
             stream::start_host,
             stream::cancel_host,
+            stream::get_session,
+            stream::pause_session,
+            stream::end_session,
             // -- Input (hybrid mode)
             input::input_connect,
         ])

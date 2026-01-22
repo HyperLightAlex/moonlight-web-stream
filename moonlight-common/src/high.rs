@@ -563,9 +563,12 @@ mod stream {
             Ok(!NVIDIA_SUPPORTED_RESOLUTIONS.contains(&(width, height)) && is_nvidia)
         }
 
+        /// launch_mode: "launch" forces host_launch, "resume" forces host_resume
+        /// If None, falls back to checking current_game (legacy behavior)
         pub async fn start_stream(
             &mut self,
             instance: &MoonlightInstance,
+            launch_mode: Option<&str>,
             app_id: u32,
             width: u32,
             height: u32,
@@ -648,7 +651,26 @@ mod stream {
                 uuid: Uuid::new_v4(),
             };
 
-            let rtsp_session_url = if current_game == 0 {
+            // Determine whether to launch or resume
+            // Priority: explicit launch_mode > current_game check
+            let should_launch = match launch_mode {
+                Some("launch") => {
+                    log::info!("[MoonlightHost]: Using explicit launch mode: LAUNCH");
+                    true
+                }
+                Some("resume") => {
+                    log::info!("[MoonlightHost]: Using explicit launch mode: RESUME");
+                    false
+                }
+                _ => {
+                    // Legacy behavior: check current_game
+                    log::info!("[MoonlightHost]: No launch_mode provided, checking current_game={}", current_game);
+                    current_game == 0
+                }
+            };
+
+            let rtsp_session_url = if should_launch {
+                log::info!("[MoonlightHost]: Calling host_launch for app_id={}", app_id);
                 let launch_response = host_launch(
                     instance,
                     &mut self.client,
@@ -660,6 +682,7 @@ mod stream {
 
                 launch_response.rtsp_session_url
             } else {
+                log::info!("[MoonlightHost]: Calling host_resume for app_id={}", app_id);
                 let resume_response = host_resume(
                     instance,
                     &mut self.client,
