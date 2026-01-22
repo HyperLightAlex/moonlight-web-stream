@@ -392,9 +392,40 @@ async fn get_app_image(
     mut user: AuthenticatedUser,
     Query(query): Query<GetAppImageQuery>,
 ) -> Result<Bytes, AppError> {
+    use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
     let host_id = HostId(query.host_id);
     let app_id = AppId(query.app_id);
 
+    // When embedded in Fuji, get box art from Fuji's game library
+    if is_embedded_in_fuji().await {
+        // Find the game by matching the hashed app_id
+        if let Ok(fuji_games) = fuji_client().get_games(None, None).await {
+            let found_game = fuji_games.games.into_iter().find(|game| {
+                let mut hasher = DefaultHasher::new();
+                game.title.hash(&mut hasher);
+                let hashed_id = (hasher.finish() & 0x7FFFFFFF) as u32;
+                hashed_id == app_id.0
+            });
+
+            if let Some(game) = found_game {
+                // Get cover from Fuji
+                match fuji_client().get_game_cover(&game.id, Some("medium")).await {
+                    Ok(image_bytes) => {
+                        return Ok(Bytes::from(image_bytes));
+                    }
+                    Err(e) => {
+                        warn!("[AppImage]: Failed to get cover from Fuji for '{}': {:?}", game.title, e);
+                        // Fall through to Sunshine lookup
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: get from Sunshine (non-Fuji mode or Fuji lookup failed)
     let mut host = user.host(host_id).await?;
 
     let image = host

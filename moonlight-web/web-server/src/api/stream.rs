@@ -281,9 +281,10 @@ pub async fn start_host(
         // Fuji handles all the decision-making:
         // 1. Check if a different game is running
         // 2. Cancel the previous game if needed  
-        // 3. Return "launch" or "resume" action
+        // 3. Return "launch" or "resume" action AND the Sunshine app_index
         // The streamer will then execute exactly what Fuji decided.
         let mut launch_mode: Option<String> = None;
+        let mut sunshine_app_index: Option<u32> = None; // The actual Sunshine app ID to use
         let mut fuji_game_id: Option<String> = fuji_game_id_early; // Use ID found during app lookup
         
         {
@@ -313,7 +314,7 @@ pub async fn start_host(
                     info!("[Stream]: Using Fuji game ID: {}", game_id);
 
                     // Call Fuji's stream orchestration endpoint
-                    // This handles cancel if needed and returns the action
+                    // This handles cancel if needed and returns the action + Sunshine app_index
                     let _ = send_ws_message(
                         &mut session,
                         StreamServerMessage::StageStarting {
@@ -325,11 +326,16 @@ pub async fn start_host(
                     match fuji_client().stream_launch(game_id).await {
                         Ok(response) => {
                             if response.success {
+                                // Get the Sunshine app_index - this is CRITICAL for streaming
+                                sunshine_app_index = response.app_index;
+                                info!("[Stream]: Fuji returned Sunshine app_index: {:?}", sunshine_app_index);
+                                
                                 if let Some(action) = &response.action {
                                     launch_mode = Some(action.clone());
                                     info!(
-                                        "[Stream]: Fuji orchestration decided: action={}, cancelledPrevious={:?}",
+                                        "[Stream]: Fuji orchestration decided: action={}, appIndex={:?}, cancelledPrevious={:?}",
                                         action,
+                                        sunshine_app_index,
                                         response.cancelled_previous
                                     );
 
@@ -366,6 +372,13 @@ pub async fn start_host(
                 info!("[Stream]: NOT embedded in Fuji, streamer will decide launch mode");
             }
         }
+        
+        // Determine the actual app_id to send to the streamer
+        // When embedded in Fuji, use the Sunshine app_index from orchestration
+        // Otherwise, use the original app_id from the request
+        let streamer_app_id = sunshine_app_index.unwrap_or(app_id.0);
+        info!("[Stream]: Using app_id {} for streamer (original: {}, sunshine_app_index: {:?})", 
+              streamer_app_id, app_id.0, sunshine_app_index);
 
         // -- Send App info
         let _ = send_ws_message(
@@ -654,7 +667,7 @@ pub async fn start_host(
                 client_private_key: pair_info.client_private_key,
                 client_certificate: pair_info.client_certificate,
                 server_certificate: pair_info.server_certificate,
-                app_id: app_id.0,
+                app_id: streamer_app_id,
                 session_token,
                 launch_mode,
             })
