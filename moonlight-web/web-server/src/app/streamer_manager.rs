@@ -18,9 +18,15 @@ use tokio::{
 
 #[cfg(target_os = "windows")]
 use std::process::Command as StdCommand;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 /// Cleanup interval for checking zombie entries in our tracking map
 const CLEANUP_INTERVAL_SECS: u64 = 60;
+
+/// Windows flag to hide console window when spawning processes
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Information about a tracked streamer process
 #[derive(Debug)]
@@ -162,6 +168,7 @@ impl StreamerProcessManager {
             // Get list of all streamer.exe processes using tasklist
             let output = StdCommand::new("tasklist")
                 .args(["/FI", "IMAGENAME eq streamer.exe", "/FO", "CSV", "/NH"])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output();
 
             match output {
@@ -283,6 +290,7 @@ impl StreamerProcessManager {
         {
             let output = StdCommand::new("tasklist")
                 .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output();
             
             match output {
@@ -307,6 +315,7 @@ impl StreamerProcessManager {
         {
             let output = StdCommand::new("taskkill")
                 .args(["/F", "/PID", &pid.to_string()])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output();
             
             match output {
