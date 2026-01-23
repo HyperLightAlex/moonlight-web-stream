@@ -19,11 +19,8 @@ use tokio::{
 #[cfg(target_os = "windows")]
 use std::process::Command as StdCommand;
 
-/// Cleanup interval for checking orphaned processes
-const CLEANUP_INTERVAL_SECS: u64 = 30;
-
-/// Max age for a tracked process before it's considered orphaned (5 minutes)
-const MAX_PROCESS_AGE_SECS: u64 = 300;
+/// Cleanup interval for checking zombie entries in our tracking map
+const CLEANUP_INTERVAL_SECS: u64 = 60;
 
 /// Information about a tracked streamer process
 #[derive(Debug)]
@@ -249,36 +246,34 @@ impl StreamerProcessManager {
         }
     }
 
-    /// Internal cleanup: remove stale entries and check for zombies
+    /// Internal cleanup: remove zombie entries from our tracking map
+    /// (processes that have exited but are still in our map)
+    /// NOTE: We do NOT kill long-running tracked processes - they are legitimate streaming sessions!
     async fn do_cleanup(processes: &Arc<Mutex<HashMap<u32, StreamerProcessInfo>>>) {
-        let now = Instant::now();
-        let mut stale_pids = Vec::new();
+        let mut dead_pids = Vec::new();
 
         {
             let processes_lock = processes.lock().await;
-            for (pid, info) in processes_lock.iter() {
-                // Check if process has been running too long (likely orphaned)
-                let age = now.duration_since(info.started_at);
-                if age > Duration::from_secs(MAX_PROCESS_AGE_SECS) {
-                    // Check if process is still running
-                    if Self::is_process_running(*pid).await {
-                        warn!(
-                            "[StreamerManager] Process {} has been running for {:?}, may be orphaned",
-                            pid, age
-                        );
-                        stale_pids.push(*pid);
-                    }
+            for (pid, _info) in processes_lock.iter() {
+                // Only remove entries for processes that are no longer running
+                // (zombie entries from processes that crashed or were killed externally)
+                if !Self::is_process_running(*pid).await {
+                    debug!(
+                        "[StreamerManager] Process {} is no longer running, removing from tracking",
+                        pid
+                    );
+                    dead_pids.push(*pid);
                 }
             }
         }
 
-        // Kill stale processes
-        for pid in stale_pids {
-            warn!("[StreamerManager] Cleaning up stale process {}", pid);
-            Self::kill_pid(pid).await;
-            
+        // Remove dead entries from our tracking map
+        if !dead_pids.is_empty() {
             let mut processes_lock = processes.lock().await;
-            processes_lock.remove(&pid);
+            for pid in dead_pids {
+                processes_lock.remove(&pid);
+                debug!("[StreamerManager] Removed dead process {} from tracking", pid);
+            }
         }
     }
 
