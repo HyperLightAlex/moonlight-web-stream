@@ -7,22 +7,17 @@ use log::{debug, info, warn, error};
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tokio::{
     process::Child,
     sync::Mutex,
-    spawn,
-    time::interval,
 };
 
 #[cfg(target_os = "windows")]
 use std::process::Command as StdCommand;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-
-/// Cleanup interval for checking zombie entries in our tracking map
-const CLEANUP_INTERVAL_SECS: u64 = 60;
 
 /// Windows flag to hide console window when spawning processes
 #[cfg(target_os = "windows")]
@@ -58,18 +53,14 @@ impl Default for StreamerProcessManager {
 
 impl StreamerProcessManager {
     /// Create a new streamer process manager
+    /// 
+    /// Note: No background cleanup task is started. Cleanup happens:
+    /// 1. On-demand via `cleanup_before_new_session()` before starting new streams
+    /// 2. When explicitly called via `kill_orphaned_streamers()`
+    /// 
+    /// This design avoids unnecessary resource usage during long-running sessions.
     pub fn new() -> Self {
         let processes = Arc::new(Mutex::new(HashMap::new()));
-        
-        // Start background cleanup task
-        let processes_cleanup = processes.clone();
-        spawn(async move {
-            let mut cleanup_interval = interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
-            loop {
-                cleanup_interval.tick().await;
-                Self::do_cleanup(&processes_cleanup).await;
-            }
-        });
 
         Self {
             processes,
@@ -249,37 +240,6 @@ impl StreamerProcessManager {
                 Err(e) => {
                     debug!("[StreamerManager] pgrep not available or failed: {:?}", e);
                 }
-            }
-        }
-    }
-
-    /// Internal cleanup: remove zombie entries from our tracking map
-    /// (processes that have exited but are still in our map)
-    /// NOTE: We do NOT kill long-running tracked processes - they are legitimate streaming sessions!
-    async fn do_cleanup(processes: &Arc<Mutex<HashMap<u32, StreamerProcessInfo>>>) {
-        let mut dead_pids = Vec::new();
-
-        {
-            let processes_lock = processes.lock().await;
-            for (pid, _info) in processes_lock.iter() {
-                // Only remove entries for processes that are no longer running
-                // (zombie entries from processes that crashed or were killed externally)
-                if !Self::is_process_running(*pid).await {
-                    debug!(
-                        "[StreamerManager] Process {} is no longer running, removing from tracking",
-                        pid
-                    );
-                    dead_pids.push(*pid);
-                }
-            }
-        }
-
-        // Remove dead entries from our tracking map
-        if !dead_pids.is_empty() {
-            let mut processes_lock = processes.lock().await;
-            for pid in dead_pids {
-                processes_lock.remove(&pid);
-                debug!("[StreamerManager] Removed dead process {} from tracking", pid);
             }
         }
     }
