@@ -114,6 +114,29 @@ impl Host {
         Ok(())
     }
 
+    /// Update the host's HTTP port (used for dynamic port handling when embedded in Fuji)
+    pub async fn update_port(&mut self, http_port: u16) -> Result<(), AppError> {
+        let app = self.app.access()?;
+
+        // Clear cached storage to force refresh
+        self.cache_storage = None;
+        self.cache_host_info = None;
+
+        // Update just the port
+        app.storage.modify_host(self.id, StorageHostModify {
+            owner: None,
+            address: None,
+            http_port: Some(http_port),
+            pair_info: None,
+            cache_name: None,
+            cache_mac: None,
+        }).await?;
+
+        log::info!("[Host] Updated port to {}", http_port);
+
+        Ok(())
+    }
+
     pub async fn owner(&self) -> Result<Option<UserId>, AppError> {
         let app = self.app.access()?;
 

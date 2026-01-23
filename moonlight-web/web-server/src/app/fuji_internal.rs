@@ -92,11 +92,15 @@ pub struct FujiGamesResponse {
 }
 
 /// Sunshine app (from Fuji's proxy to Sunshine)
-#[derive(Debug, Deserialize)]
+/// When synced from Fuji, apps include fuji_game_id for direct mapping
+#[derive(Debug, Deserialize, Clone)]
 pub struct SunshineApp {
     pub id: u32,
     pub title: String,
+    #[serde(default)]
     pub is_hdr_supported: bool,
+    /// Fuji game ID (e.g., "steam_1229240") - present for Fuji-synced games
+    pub fuji_game_id: Option<String>,
 }
 
 /// Sunshine apps list response (from Fuji's proxy endpoint)
@@ -156,6 +160,19 @@ pub struct StopResponse {
 pub struct StreamLaunchRequest {
     #[serde(rename = "gameId")]
     pub game_id: String,
+}
+
+/// Stream launch request with both IDs (for orchestration endpoint)
+#[derive(Debug, Serialize)]
+pub struct StreamLaunchWithIdsRequest {
+    /// Fuji game ID (for internal tracking, optional)
+    #[serde(rename = "fujiGameId", skip_serializing_if = "Option::is_none")]
+    pub fuji_game_id: Option<String>,
+    /// Sunshine's real app ID (for streaming)
+    #[serde(rename = "sunshineAppId")]
+    pub sunshine_app_id: u32,
+    /// Game title (for matching/logging)
+    pub title: String,
 }
 
 /// Stream launch response (from orchestration endpoint)
@@ -559,6 +576,66 @@ impl FujiInternalClient {
                 "[Fuji] Stream orchestration result: action={:?}, appIndex={:?}, cancelledPrevious={:?}", 
                 launch_response.action,
                 launch_response.app_index,
+                launch_response.cancelled_previous
+            );
+        } else {
+            warn!("[Fuji] Stream orchestration failed: {:?}", launch_response.error);
+        }
+
+        Ok(launch_response)
+    }
+
+    /// Launch stream with both Fuji game ID and Sunshine app ID
+    /// 
+    /// This variant passes both IDs to Fuji:
+    /// - fuji_game_id: For Fuji's internal game tracking (optional)
+    /// - sunshine_app_id: The REAL Sunshine app ID for streaming
+    /// - title: Game title for matching/logging
+    /// 
+    /// Fuji uses these to track the session and make orchestration decisions.
+    /// The sunshine_app_id is what the streamer will use for /launch calls.
+    pub async fn stream_launch_with_sunshine_id(
+        &self, 
+        fuji_game_id: Option<&str>,
+        sunshine_app_id: u32,
+        title: &str,
+    ) -> Result<StreamLaunchResponse, FujiInternalError> {
+        let url = format!("{}/stream/launch", self.base_url);
+        
+        let request = StreamLaunchWithIdsRequest { 
+            fuji_game_id: fuji_game_id.map(|s| s.to_string()),
+            sunshine_app_id,
+            title: title.to_string(),
+        };
+
+        info!(
+            "[Fuji] Calling stream orchestration with IDs - fuji: {:?}, sunshine: {}, title: '{}'",
+            fuji_game_id, sunshine_app_id, title
+        );
+
+        let response = self.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(FujiInternalError::GameNotFound(title.to_string()));
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("[Fuji] Stream launch failed: {} - {}", status, body);
+            return Err(FujiInternalError::LaunchFailed(body));
+        }
+
+        let launch_response: StreamLaunchResponse = response.json().await?;
+        
+        if launch_response.success {
+            info!(
+                "[Fuji] Stream orchestration result: action={:?}, cancelledPrevious={:?}", 
+                launch_response.action,
                 launch_response.cancelled_previous
             );
         } else {

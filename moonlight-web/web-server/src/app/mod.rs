@@ -26,6 +26,24 @@ use crate::app::{
     user::{Admin, AuthenticatedUser, Role, User, UserId},
 };
 
+/// Mapping entry for Sunshine app → Fuji game
+#[derive(Debug, Clone)]
+pub struct AppMapping {
+    pub sunshine_app_id: u32,
+    pub sunshine_title: String,
+    pub fuji_game_id: Option<String>,
+    pub fuji_title: Option<String>,
+}
+
+/// Cache for Sunshine app to Fuji game mappings
+#[derive(Debug, Default)]
+pub struct AppMappingCache {
+    /// Map from Sunshine app ID to AppMapping
+    mappings: HashMap<u32, AppMapping>,
+    /// Map from title hash (used by client) to Sunshine app ID
+    title_hash_to_sunshine_id: HashMap<u32, u32>,
+}
+
 pub mod auth;
 pub mod fuji;
 pub mod fuji_internal;
@@ -146,6 +164,8 @@ struct AppInner {
     app_image_cache: RwLock<HashMap<(UserId, HostId, AppId), Bytes>>,
     /// Session manager for hybrid streaming mode
     session_manager: SessionManager,
+    /// Cache for Sunshine app → Fuji game mappings
+    app_mapping_cache: RwLock<AppMappingCache>,
 }
 
 pub type MoonlightClient = ReqwestClient;
@@ -161,6 +181,7 @@ impl App {
             config,
             app_image_cache: Default::default(),
             session_manager: SessionManager::new(),
+            app_mapping_cache: Default::default(),
         };
 
         Ok(Self {
@@ -171,6 +192,57 @@ impl App {
     /// Get the session manager for hybrid streaming mode
     pub fn session_manager(&self) -> &SessionManager {
         &self.inner.session_manager
+    }
+
+    /// Get the app mapping cache
+    pub fn app_mapping_cache(&self) -> &RwLock<AppMappingCache> {
+        &self.inner.app_mapping_cache
+    }
+
+    /// Update the app mapping cache with new mappings
+    pub async fn update_app_mappings(&self, mappings: Vec<AppMapping>) {
+        let mut cache = self.inner.app_mapping_cache.write().await;
+        cache.mappings.clear();
+        cache.title_hash_to_sunshine_id.clear();
+        
+        for mapping in mappings {
+            // Store title hash → sunshine ID mapping
+            let title_hash = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                mapping.sunshine_title.hash(&mut hasher);
+                (hasher.finish() & 0x7FFFFFFF) as u32
+            };
+            cache.title_hash_to_sunshine_id.insert(title_hash, mapping.sunshine_app_id);
+            cache.mappings.insert(mapping.sunshine_app_id, mapping);
+        }
+    }
+
+    /// Get Fuji game ID for a given Sunshine app ID
+    pub async fn get_fuji_game_id(&self, sunshine_app_id: u32) -> Option<String> {
+        let cache = self.inner.app_mapping_cache.read().await;
+        cache.mappings.get(&sunshine_app_id)
+            .and_then(|m| m.fuji_game_id.clone())
+    }
+
+    /// Get Sunshine app ID from a title hash (what client sends)
+    pub async fn get_sunshine_id_from_hash(&self, title_hash: u32) -> Option<u32> {
+        let cache = self.inner.app_mapping_cache.read().await;
+        cache.title_hash_to_sunshine_id.get(&title_hash).copied()
+    }
+
+    /// Get full mapping info for a Sunshine app ID
+    pub async fn get_app_mapping(&self, sunshine_app_id: u32) -> Option<AppMapping> {
+        let cache = self.inner.app_mapping_cache.read().await;
+        cache.mappings.get(&sunshine_app_id).cloned()
+    }
+
+    /// Get full mapping info from a title hash
+    pub async fn get_app_mapping_from_hash(&self, title_hash: u32) -> Option<AppMapping> {
+        let cache = self.inner.app_mapping_cache.read().await;
+        let sunshine_id = cache.title_hash_to_sunshine_id.get(&title_hash)?;
+        cache.mappings.get(sunshine_id).cloned()
     }
 
     fn new_ref(&self) -> AppRef {

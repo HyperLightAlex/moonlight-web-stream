@@ -145,88 +145,43 @@ pub async fn start_host(
             }
         };
 
-        // When embedded in Fuji, look up the game from Fuji's library
-        // The app_id is a hash of the game title (generated in /api/apps)
-        // When not embedded, use Sunshine's app list directly
+        // Look up the app from Sunshine's list
+        // Now that we use real Sunshine IDs (from /api/apps), we can find apps directly
+        // When embedded in Fuji, we also lookup the Fuji game ID from our cached mapping
         let app: App;
         let mut fuji_game_id_early: Option<String> = None;
         
         {
-            use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
+            use crate::app::fuji_internal::is_embedded_in_fuji;
             
-            if is_embedded_in_fuji().await {
-                info!("[Stream]: Looking up game from Fuji's library (app_id={})", app_id.0);
-                
-                match fuji_client().get_games(None, None).await {
-                    Ok(fuji_games) => {
-                        // Find the game by matching the hashed title
-                        let found_game = fuji_games.games.into_iter().find(|game| {
-                            let mut hasher = DefaultHasher::new();
-                            game.title.hash(&mut hasher);
-                            let hashed_id = (hasher.finish() & 0x7FFFFFFF) as u32;
-                            hashed_id == app_id.0
-                        });
-                        
-                        if let Some(game) = found_game {
-                            info!("[Stream]: Found Fuji game: '{}' (id={})", game.title, game.id);
-                            fuji_game_id_early = Some(game.id.clone());
-                            
-                            // Create a synthetic App for the rest of the flow
-                            app = App {
-                                id: AppId(app_id.0),
-                                title: game.title,
-                                is_hdr_supported: false,
-                            };
-                        } else {
-                            warn!("[Stream]: Game not found in Fuji library for app_id={}", app_id.0);
-                            let _ = send_ws_message(&mut session, StreamServerMessage::AppNotFound).await;
-                            let _ = session.close(None).await;
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        warn!("[Stream]: Failed to get Fuji games: {:?}, falling back to Sunshine", e);
-                        // Fall through to Sunshine lookup below
-                        let apps = match host.list_apps(&mut user).await {
-                            Ok(apps) => apps,
-                            Err(err) => {
-                                warn!("failed to start stream for host {host_id:?} (at list_apps): {err:?}");
-                                let _ = send_ws_message(&mut session, StreamServerMessage::InternalServerError).await;
-                                let _ = session.close(None).await;
-                                return;
-                            }
-                        };
-                        
-                        let Some(found_app) = apps.into_iter().find(|a| a.id == app_id) else {
-                            warn!("failed to start stream for host {host_id:?} because the app couldn't be found!");
-                            let _ = send_ws_message(&mut session, StreamServerMessage::AppNotFound).await;
-                            let _ = session.close(None).await;
-                            return;
-                        };
-                        app = found_app;
-                    }
-                }
-            } else {
-                // Not embedded - use Sunshine's app list directly
-                let apps = match host.list_apps(&mut user).await {
-                    Ok(apps) => apps,
-                    Err(err) => {
-                        warn!("failed to start stream for host {host_id:?} (at list_apps): {err:?}");
-                        let _ = send_ws_message(&mut session, StreamServerMessage::InternalServerError).await;
-                        let _ = session.close(None).await;
-                        return;
-                    }
-                };
-
-                let Some(found_app) = apps.into_iter().find(|a| a.id == app_id) else {
-                    warn!("failed to start stream for host {host_id:?} because the app couldn't be found!");
-                    let _ = send_ws_message(&mut session, StreamServerMessage::AppNotFound).await;
+            // Get Sunshine apps
+            let apps = match host.list_apps(&mut user).await {
+                Ok(apps) => apps,
+                Err(err) => {
+                    warn!("failed to start stream for host {host_id:?} (at list_apps): {err:?}");
+                    let _ = send_ws_message(&mut session, StreamServerMessage::InternalServerError).await;
                     let _ = session.close(None).await;
                     return;
-                };
-                app = found_app;
+                }
+            };
+
+            // Find the app by its real Sunshine ID
+            let Some(found_app) = apps.into_iter().find(|a| a.id == app_id) else {
+                warn!("failed to start stream for host {host_id:?} because the app couldn't be found!");
+                let _ = send_ws_message(&mut session, StreamServerMessage::AppNotFound).await;
+                let _ = session.close(None).await;
+                return;
+            };
+            app = found_app;
+
+            // When embedded in Fuji, get the Fuji game ID from our cached mapping
+            if is_embedded_in_fuji().await {
+                if let Some(fuji_id) = web_app.get_fuji_game_id(app_id.0).await {
+                    info!("[Stream]: Found cached Fuji mapping for Sunshine ID {}: {}", app_id.0, fuji_id);
+                    fuji_game_id_early = Some(fuji_id);
+                } else {
+                    info!("[Stream]: No Fuji mapping for Sunshine ID {}, app title: '{}'", app_id.0, app.title);
+                }
             }
         }
 
@@ -281,11 +236,10 @@ pub async fn start_host(
         // Fuji handles all the decision-making:
         // 1. Check if a different game is running
         // 2. Cancel the previous game if needed  
-        // 3. Return "launch" or "resume" action AND the Sunshine app_index
-        // The streamer will then execute exactly what Fuji decided.
+        // 3. Return "launch" or "resume" action
+        // We pass BOTH the Sunshine app ID and Fuji game ID for tracking
         let mut launch_mode: Option<String> = None;
-        let mut sunshine_app_index: Option<u32> = None; // The actual Sunshine app ID to use
-        let mut fuji_game_id: Option<String> = fuji_game_id_early; // Use ID found during app lookup
+        let fuji_game_id: Option<String> = fuji_game_id_early; // Use ID found during app lookup
         
         {
             use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
@@ -297,68 +251,54 @@ pub async fn start_host(
             if embedded {
                 info!("[Stream]: Embedded in Fuji, using stream orchestration");
 
-                // Use the game ID found during app lookup (or find it now as fallback)
-                if fuji_game_id.is_none() {
-                    info!("[Stream]: Looking up Fuji game ID for '{}'...", app_title);
-                    if let Ok(fuji_games) = fuji_client().get_games(None, None).await {
-                        if let Some(game) = fuji_games.games.iter().find(|g| {
-                            g.title.to_lowercase() == app_title.to_lowercase()
-                        }) {
-                            fuji_game_id = Some(game.id.clone());
-                            info!("[Stream]: Found Fuji game '{}' (id={})", game.title, game.id);
-                        }
-                    }
-                }
+                let _ = send_ws_message(
+                    &mut session,
+                    StreamServerMessage::StageStarting {
+                        stage: "Preparing Stream".to_string(),
+                    },
+                )
+                .await;
 
-                if let Some(ref game_id) = fuji_game_id {
-                    info!("[Stream]: Using Fuji game ID: {}", game_id);
-
-                    // Call Fuji's stream orchestration endpoint
-                    // This handles cancel if needed and returns the action + Sunshine app_index
-                    let _ = send_ws_message(
-                        &mut session,
-                        StreamServerMessage::StageStarting {
-                            stage: "Preparing Stream".to_string(),
-                        },
+                // Call Fuji's stream orchestration endpoint
+                // Pass BOTH the Fuji game ID and Sunshine app ID
+                // Fuji uses Fuji game ID for its internal tracking
+                // But we use Sunshine's real app ID for streaming
+                let orchestration_result = fuji_client()
+                    .stream_launch_with_sunshine_id(
+                        fuji_game_id.as_deref(),
+                        app_id.0,
+                        &app_title,
                     )
                     .await;
 
-                    match fuji_client().stream_launch(game_id).await {
-                        Ok(response) => {
-                            if response.success {
-                                // Get the Sunshine app_index - this is CRITICAL for streaming
-                                sunshine_app_index = response.app_index;
-                                info!("[Stream]: Fuji returned Sunshine app_index: {:?}", sunshine_app_index);
-                                
-                                if let Some(action) = &response.action {
-                                    launch_mode = Some(action.clone());
-                                    info!(
-                                        "[Stream]: Fuji orchestration decided: action={}, appIndex={:?}, cancelledPrevious={:?}",
-                                        action,
-                                        sunshine_app_index,
-                                        response.cancelled_previous
-                                    );
+                match orchestration_result {
+                    Ok(response) => {
+                        if response.success {
+                            if let Some(action) = &response.action {
+                                launch_mode = Some(action.clone());
+                                info!(
+                                    "[Stream]: Fuji orchestration decided: action={}, cancelledPrevious={:?}",
+                                    action,
+                                    response.cancelled_previous
+                                );
 
-                                    if response.cancelled_previous.unwrap_or(false) {
-                                        let _ = send_ws_message(
-                                            &mut session,
-                                            StreamServerMessage::StageComplete {
-                                                stage: "Stopped Previous Game".to_string(),
-                                            },
-                                        )
-                                        .await;
-                                    }
+                                if response.cancelled_previous.unwrap_or(false) {
+                                    let _ = send_ws_message(
+                                        &mut session,
+                                        StreamServerMessage::StageComplete {
+                                            stage: "Stopped Previous Game".to_string(),
+                                        },
+                                    )
+                                    .await;
                                 }
-                            } else {
-                                warn!("[Stream]: Fuji orchestration failed: {:?}", response.error);
                             }
-                        }
-                        Err(e) => {
-                            warn!("[Stream]: Fuji stream orchestration failed: {:?}, streamer will decide", e);
+                        } else {
+                            warn!("[Stream]: Fuji orchestration failed: {:?}", response.error);
                         }
                     }
-                } else {
-                    warn!("[Stream]: No Fuji game ID available, streamer will decide launch mode");
+                    Err(e) => {
+                        warn!("[Stream]: Fuji stream orchestration failed: {:?}, streamer will decide", e);
+                    }
                 }
 
                 let _ = send_ws_message(
@@ -373,12 +313,11 @@ pub async fn start_host(
             }
         }
         
-        // Determine the actual app_id to send to the streamer
-        // When embedded in Fuji, use the Sunshine app_index from orchestration
-        // Otherwise, use the original app_id from the request
-        let streamer_app_id = sunshine_app_index.unwrap_or(app_id.0);
-        info!("[Stream]: Using app_id {} for streamer (original: {}, sunshine_app_index: {:?})", 
-              streamer_app_id, app_id.0, sunshine_app_index);
+        // Use the REAL Sunshine app ID for streaming
+        // No translation needed - client now sends real IDs from /api/apps
+        let streamer_app_id = app_id.0;
+        info!("[Stream]: Using Sunshine app_id {} for streamer (title: '{}')", 
+              streamer_app_id, app_title);
 
         // -- Send App info
         let _ = send_ws_message(
