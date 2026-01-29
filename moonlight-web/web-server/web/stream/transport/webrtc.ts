@@ -208,7 +208,7 @@ export class WebRTCTransport implements Transport {
         if (this.peer.connectionState == "connected") {
             type = "recover"
             this.setDelayHintInterval(true)
-        } else if ((this.peer.connectionState == "failed" || this.peer.connectionState == "disconnected") && this.peer.iceGatheringState == "complete") {
+        } else if ((this.peer.connectionState == "failed" || this.peer.connectionState == "closed") && this.peer.iceGatheringState == "complete") {
             type = "fatal"
             this.setDelayHintInterval(false)
         }
