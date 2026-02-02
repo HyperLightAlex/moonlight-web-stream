@@ -60,17 +60,16 @@ export class WebRTCTransport implements Transport {
         }
     }
     async onReceiveMessage(message: StreamSignalingMessage) {
-        const timestamp = new Date().toISOString()
         if ("Description" in message) {
             const description = message.Description;
-            console.info(`[WebRTC][${timestamp}]: Received remote description type: ${description.ty}`)
+            console.info(`[WebRTC]: Received remote description type: ${description.ty}`)
             await this.handleRemoteDescription({
                 type: description.ty as RTCSdpType,
                 sdp: description.sdp
             })
         } else if ("AddIceCandidate" in message) {
             const candidate = message.AddIceCandidate
-            console.info(`[WebRTC][${timestamp}]: Received ICE candidate: ${candidate.candidate?.substring(0, 50)}...`)
+            console.info(`[WebRTC]: Received ICE candidate: ${candidate.candidate?.substring(0, 50)}...`)
             await this.addIceCandidate({
                 candidate: candidate.candidate,
                 sdpMid: candidate.sdp_mid,
@@ -107,34 +106,22 @@ export class WebRTCTransport implements Transport {
     }
 
     private remoteDescription: RTCSessionDescriptionInit | null = null
-    private lastOfferTimestamp: number = 0
     private async handleRemoteDescription(sdp: RTCSessionDescriptionInit | null) {
-        const timestamp = new Date().toISOString()
-        const now = Date.now()
         this.logger?.debug(`Received remote description: ${sdp?.type}`)
-
-        // Detect duplicate offers received in quick succession
-        if (sdp?.type === "offer") {
-            const timeSinceLastOffer = now - this.lastOfferTimestamp
-            if (timeSinceLastOffer < 100) {
-                console.warn(`[WebRTC][${timestamp}]: DUPLICATE OFFER detected - only ${timeSinceLastOffer}ms since last offer!`)
-            }
-            this.lastOfferTimestamp = now
-        }
 
         this.remoteDescription = sdp
         if (!this.peer) {
-            console.warn(`[WebRTC][${timestamp}]: Cannot handle remote description - no peer connection`)
+            console.warn(`[WebRTC]: Cannot handle remote description - no peer connection`)
             return
         }
 
         if (this.remoteDescription) {
             try {
-                console.info(`[WebRTC][${timestamp}]: Setting remote description (${this.remoteDescription.type}), signalingState: ${this.peer.signalingState}`)
+                console.info(`[WebRTC]: Setting remote description (${this.remoteDescription.type})`)
                 await this.peer.setRemoteDescription(this.remoteDescription)
-                console.info(`[WebRTC][${timestamp}]: Remote description set successfully, new signalingState: ${this.peer.signalingState}`)
+                console.info(`[WebRTC]: Remote description set successfully`)
             } catch (err) {
-                console.error(`[WebRTC][${timestamp}]: Failed to set remote description:`, err)
+                console.error(`[WebRTC]: Failed to set remote description:`, err)
                 return
             }
 
@@ -142,18 +129,18 @@ export class WebRTCTransport implements Transport {
                 try {
                     await this.peer.setLocalDescription()
                 } catch (err) {
-                    console.error(`[WebRTC][${timestamp}]: Failed to create answer:`, err)
+                    console.error(`[WebRTC]: Failed to create answer:`, err)
                     return
                 }
                 const localDescription = this.peer.localDescription
                 if (!localDescription) {
-                    console.error(`[WebRTC][${timestamp}]: Peer didn't have a localDescription whilst receiving an offer and trying to answer`)
+                    console.error(`[WebRTC]: Peer didn't have a localDescription whilst receiving an offer and trying to answer`)
                     this.logger?.debug("Peer didn't have a localDescription whilst receiving an offer and trying to answer")
                     return
                 }
 
-                console.info(`[WebRTC][${timestamp}]: Sending answer (type: ${localDescription.type})`)
-                this.logger?.debug(`Responding to offer with answer`)
+                console.info(`[WebRTC]: Sending answer`)
+                this.logger?.debug(`Responding to offer description: ${localDescription.type}`)
                 this.sendMessage({
                     Description: {
                         ty: localDescription.type,
@@ -221,23 +208,17 @@ export class WebRTCTransport implements Transport {
         if (this.peer.connectionState == "connected") {
             type = "recover"
             this.setDelayHintInterval(true)
+
+            if (this.onconnected) {
+                this.onconnected()
+            }
         } else if ((this.peer.connectionState == "failed" || this.peer.connectionState == "closed") && this.peer.iceGatheringState == "complete") {
             type = "fatal"
             this.setDelayHintInterval(false)
         }
 
-        // Enhanced logging with timestamp for debugging disconnect issues
-        const timestamp = new Date().toISOString()
-        console.info(`[WebRTC][${timestamp}]: Connection state: ${this.peer.connectionState}, ICE connection: ${this.peer.iceConnectionState}, ICE gathering: ${this.peer.iceGatheringState}, type: ${type ?? 'none'}`)
-        
-        if (type === "fatal") {
-            console.warn(`[WebRTC][${timestamp}]: FATAL connection state detected - connectionState=${this.peer.connectionState}, iceGatheringState=${this.peer.iceGatheringState}`)
-        } else if (type === "recover") {
-            console.info(`[WebRTC][${timestamp}]: Connection recovered/established`)
-        } else if (this.peer.connectionState === "disconnected") {
-            console.warn(`[WebRTC][${timestamp}]: Connection DISCONNECTED (not treated as fatal - may recover)`)
-        }
-        
+        // Always log connection state changes to console for debugging
+        console.info(`[WebRTC]: Connection state: ${this.peer.connectionState}, ICE gathering: ${this.peer.iceGatheringState}`)
         this.logger?.debug(`Changing Peer State to ${this.peer.connectionState}`, {
             type: type ?? undefined
         })
@@ -247,16 +228,8 @@ export class WebRTCTransport implements Transport {
             this.logger?.debug("OnIceConnectionStateChange without a peer")
             return
         }
-        // Enhanced logging with timestamp
-        const timestamp = new Date().toISOString()
-        console.info(`[WebRTC][${timestamp}]: ICE connection state: ${this.peer.iceConnectionState}`)
-        
-        if (this.peer.iceConnectionState === "disconnected") {
-            console.warn(`[WebRTC][${timestamp}]: ICE DISCONNECTED - waiting for recovery or failure`)
-        } else if (this.peer.iceConnectionState === "failed") {
-            console.error(`[WebRTC][${timestamp}]: ICE FAILED - connection cannot be established`)
-        }
-        
+        // Always log ICE state changes to console for debugging
+        console.info(`[WebRTC]: ICE connection state: ${this.peer.iceConnectionState}`)
         this.logger?.debug(`Changing Peer Ice State to ${this.peer.iceConnectionState}`)
     }
     private onIceGatheringStateChange() {
@@ -264,8 +237,6 @@ export class WebRTCTransport implements Transport {
             this.logger?.debug("OnIceGatheringStateChange without a peer")
             return
         }
-        const timestamp = new Date().toISOString()
-        console.info(`[WebRTC][${timestamp}]: ICE gathering state: ${this.peer.iceGatheringState}`)
         this.logger?.debug(`Changing Peer Ice Gathering State to ${this.peer.iceGatheringState}`)
     }
 
