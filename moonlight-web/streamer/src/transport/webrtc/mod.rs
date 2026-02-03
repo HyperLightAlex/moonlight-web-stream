@@ -85,8 +85,9 @@ struct WebRtcInner {
     input_peer: Mutex<Option<Arc<RTCPeerConnection>>>,
     // Stats channel on input peer (preferred in hybrid mode)
     input_stats_channel: Mutex<Option<Arc<RTCDataChannel>>>,
-    // Store config for creating input peer
+    // Store config for creating input peer (includes port range, network types, etc.)
     rtc_config: RTCConfiguration,
+    webrtc_config: WebRtcConfig,
     // Track last keepalive response time (for client-created keepalive channel)
     last_keepalive_response: Mutex<Instant>,
     // Track pings sent without pong response (for asymmetric connectivity detection)
@@ -94,6 +95,10 @@ struct WebRtcInner {
     // Offer batching - delay offer to allow multiple track additions to be batched
     offer_batch_deadline: Arc<Mutex<Option<Instant>>>,
     offer_batch_task_running: Arc<Mutex<bool>>,
+    // Connection sequencing - delay input peer creation until primary is connected
+    input_peer_pending: Mutex<bool>,
+    // Track if primary peer has reached Connected state
+    primary_peer_connected: Mutex<bool>,
 }
 
 pub async fn new(
@@ -124,8 +129,18 @@ pub async fn new(
     );
     info!("[WebRTC]: ICE timeouts configured - disconnected: 60s, keepalive: 500ms, failed: 120s");
 
+    // Port range isolation: Primary peer uses the LOWER HALF of the configured port range
+    // Input peer (hybrid mode) uses the UPPER HALF - prevents STUN/ICE conflicts
     if let Some(PortRange { min, max }) = config.port_range {
-        match EphemeralUDP::new(min, max) {
+        let range_size = max - min;
+        let midpoint = min + (range_size / 2);
+        let primary_min = min;
+        let primary_max = midpoint;
+        
+        info!("[WebRTC]: Port range isolation - primary peer using ports {}-{} (input peer will use {}-{})", 
+              primary_min, primary_max, midpoint + 1, max);
+        
+        match EphemeralUDP::new(primary_min, primary_max) {
             Ok(udp) => {
                 api_settings.set_udp_network(UDPNetwork::Ephemeral(udp));
             }
@@ -190,6 +205,7 @@ pub async fn new(
 
     // Clone config for potential input peer creation later
     let rtc_config_clone = rtc_config.clone();
+    let webrtc_config_clone = config.clone();
     
     let peer = Arc::new(api.new_peer_connection(rtc_config).await?);
 
@@ -217,10 +233,13 @@ pub async fn new(
         input_peer: Mutex::new(None),
         input_stats_channel: Mutex::new(None),
         rtc_config: rtc_config_clone,
+        webrtc_config: webrtc_config_clone,
         last_keepalive_response: Mutex::new(Instant::now()),
         keepalive_pings_without_pong: Mutex::new(0),
         offer_batch_deadline: Arc::new(Mutex::new(None)),
         offer_batch_task_running: Arc::new(Mutex::new(false)),
+        input_peer_pending: Mutex::new(false),
+        primary_peer_connected: Mutex::new(false),
     });
 
     let this = Arc::downgrade(&this_owned);
@@ -367,6 +386,29 @@ impl WebRtcInner {
         if matches!(state, RTCPeerConnectionState::Connected) {
             info!("[WebRTC] Connection established - clearing any pending termination");
             self.clear_terminate_request().await;
+            
+            // Mark primary peer as connected
+            {
+                let mut connected = self.primary_peer_connected.lock().await;
+                *connected = true;
+            }
+            
+            // Check if input peer creation was pending (hybrid mode sequencing)
+            let should_create_input_peer = {
+                let mut pending = self.input_peer_pending.lock().await;
+                if *pending {
+                    *pending = false;
+                    true
+                } else {
+                    false
+                }
+            };
+            
+            if should_create_input_peer {
+                info!("[WebRTC] Primary peer connected - now creating pending input peer (connection sequencing)");
+                self.clone().create_input_peer().await;
+            }
+            
             if let Err(err) = self
                 .event_sender
                 .send(TransportEvent::StartStream {
@@ -936,10 +978,70 @@ impl WebRtcInner {
 
     // -- Input Peer (Hybrid Mode)
     async fn create_input_peer(self: &Arc<Self>) {
-        info!("[InputPeer]: Creating input-only peer connection");
+        info!("[InputPeer]: Creating input-only peer connection with isolated port range");
 
         // Create a new peer connection for input only (no media)
-        let api = APIBuilder::new().build();
+        // IMPORTANT: Configure with proper settings to match primary peer AND use isolated port range
+        let mut api_settings = SettingEngine::default();
+        
+        // Configure ICE timeouts - MUST match primary peer for consistent behavior
+        api_settings.set_ice_timeouts(
+            Some(std::time::Duration::from_secs(60)),   // disconnected_timeout - 60s to allow recovery
+            Some(std::time::Duration::from_millis(500)), // keepalive_interval - more aggressive keepalives
+            Some(std::time::Duration::from_secs(120)),  // failed_timeout - 2 minutes before giving up
+        );
+        info!("[InputPeer]: ICE timeouts configured - disconnected: 60s, keepalive: 500ms, failed: 120s");
+
+        // Port range isolation: Use the UPPER HALF of the configured port range for input peer
+        // Primary peer uses lower half, input peer uses upper half - prevents port conflicts
+        if let Some(PortRange { min, max }) = self.webrtc_config.port_range.as_ref() {
+            let range_size = max - min;
+            let midpoint = min + (range_size / 2);
+            let input_min = midpoint + 1;  // Input peer uses upper half
+            let input_max = *max;
+            
+            info!("[InputPeer]: Port range isolation - using ports {}-{} (primary uses {}-{})", 
+                  input_min, input_max, min, midpoint);
+            
+            match EphemeralUDP::new(input_min, input_max) {
+                Ok(udp) => {
+                    api_settings.set_udp_network(UDPNetwork::Ephemeral(udp));
+                }
+                Err(err) => {
+                    warn!("[InputPeer]: Failed to configure port range {}-{}: {err:?}", input_min, input_max);
+                }
+            }
+        } else {
+            // No port range configured - use default ephemeral ports
+            // This is less ideal but will work; log a warning
+            warn!("[InputPeer]: No port range configured - using default ephemeral ports (may cause conflicts)");
+        }
+
+        // Network types - match primary peer configuration
+        api_settings.set_network_types(
+            self.webrtc_config
+                .network_types
+                .iter()
+                .copied()
+                .map(into_webrtc_network_type)
+                .collect(),
+        );
+        
+        // Loopback candidates - match primary peer configuration
+        api_settings.set_include_loopback_candidate(self.webrtc_config.include_loopback_candidates);
+        
+        // NAT 1:1 mapping - match primary peer configuration
+        if let Some(mapping) = self.webrtc_config.nat_1to1.as_ref() {
+            api_settings.set_nat_1to1_ips(
+                mapping.ips.clone(),
+                into_webrtc_ice_candidate(mapping.ice_candidate_type),
+            );
+        }
+
+        // Build API with configured settings (no media engine needed for data-only peer)
+        let api = APIBuilder::new()
+            .with_setting_engine(api_settings)
+            .build();
 
         let input_peer = match api.new_peer_connection(self.rtc_config.clone()).await {
             Ok(peer) => Arc::new(peer),
@@ -948,6 +1050,8 @@ impl WebRtcInner {
                 return;
             }
         };
+        
+        info!("[InputPeer]: Input peer connection created successfully with isolated configuration");
 
         let inner = Arc::downgrade(self);
 
@@ -1467,8 +1571,18 @@ impl TransportSender for WebRTCTransportSender {
                 self.inner.on_ws_message(message).await;
             }
             ServerIpcMessage::InputJoined => {
-                info!("[WebRTC]: Input connection joined - creating input peer");
-                self.inner.clone().create_input_peer().await;
+                // Connection sequencing: Only create input peer after primary peer is connected
+                // This prevents ICE agent conflicts during simultaneous peer setup
+                let primary_connected = *self.inner.primary_peer_connected.lock().await;
+                
+                if primary_connected {
+                    info!("[WebRTC]: Input connection joined - primary peer already connected, creating input peer immediately");
+                    self.inner.clone().create_input_peer().await;
+                } else {
+                    info!("[WebRTC]: Input connection joined - primary peer not yet connected, deferring input peer creation (connection sequencing)");
+                    let mut pending = self.inner.input_peer_pending.lock().await;
+                    *pending = true;
+                }
             }
             ServerIpcMessage::InputWebSocket(signaling) => {
                 debug!("[WebRTC]: Received input signaling message");
