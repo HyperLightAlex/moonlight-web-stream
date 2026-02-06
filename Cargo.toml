@@ -98,8 +98,8 @@ cmake = { version = "0.1.54" }
 
 # TODO
 # Patch the curl crate to include the windows openssl crypto backend by default
-[patch.crates-io]
-curl = { git = "https://github.com/MrCreativ3001/curl-rust.git" }
+# [patch.crates-io]
+# curl = { git = "https://github.com/MrCreativ3001/curl-rust.git" }
 
 [workspace.lints.clippy]
 too_many_arguments = "allow"

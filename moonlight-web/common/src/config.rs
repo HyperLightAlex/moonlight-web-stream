@@ -14,6 +14,11 @@ use crate::api_bindings::RtcIceServer;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Unique server identifier, generated once on first startup.
+    /// Used by clients to associate cached credentials with this server instance
+    /// regardless of IP address changes.
+    #[serde(default)]
+    pub server_id: Option<String>,
     #[serde(default)]
     pub data_storage: StorageConfig,
     #[serde(default)]
@@ -37,6 +42,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            server_id: None,
             data_storage: Default::default(),
             streamer_path: default_streamer_path(),
             web_server: Default::default(),
@@ -109,6 +115,19 @@ pub struct WebRtcConfig {
     pub network_types: Vec<WebRtcNetworkType>,
     #[serde(default = "default_include_loopback_candidates")]
     pub include_loopback_candidates: bool,
+    /// List of network interface name patterns to exclude from ICE candidate gathering.
+    /// This is useful for filtering out VPN adapters (e.g., Hamachi, Tailscale, ZeroTier)
+    /// that can interfere with local streaming connections.
+    /// Patterns are case-insensitive and matched as substrings.
+    /// Default: ["hamachi", "tailscale", "zt", "wg", "tun", "tap"]
+    #[serde(default = "default_excluded_interfaces")]
+    pub excluded_interfaces: Vec<String>,
+    /// List of network interface name patterns to explicitly include.
+    /// If non-empty, ONLY interfaces matching these patterns will be used.
+    /// Patterns are case-insensitive and matched as substrings.
+    /// Example: ["ethernet", "wi-fi"] to only use physical adapters.
+    #[serde(default)]
+    pub included_interfaces: Vec<String>,
 }
 
 impl Default for WebRtcConfig {
@@ -119,8 +138,33 @@ impl Default for WebRtcConfig {
             nat_1to1: None,
             network_types: default_network_types(),
             include_loopback_candidates: default_include_loopback_candidates(),
+            excluded_interfaces: default_excluded_interfaces(),
+            included_interfaces: Vec::new(),
         }
     }
+}
+
+/// Default list of interface patterns to exclude from ICE candidate gathering.
+/// These are common VPN and virtual network adapters that can interfere with
+/// local streaming by causing ICE to select non-optimal candidate pairs.
+fn default_excluded_interfaces() -> Vec<String> {
+    vec![
+        "hamachi".to_string(),      // LogMeIn Hamachi VPN
+        "tailscale".to_string(),    // Tailscale VPN
+        "zerotier".to_string(),     // ZeroTier VPN
+        "zt".to_string(),           // ZeroTier (short name)
+        "wg".to_string(),           // WireGuard VPN
+        "tun".to_string(),          // Generic TUN interfaces (VPNs)
+        "tap".to_string(),          // Generic TAP interfaces (VPNs)
+        "nordlynx".to_string(),     // NordVPN
+        "proton".to_string(),       // ProtonVPN
+        "mullvad".to_string(),      // Mullvad VPN
+        "virtualbox".to_string(),   // VirtualBox host adapters
+        "vmware".to_string(),       // VMware host adapters
+        "hyper-v".to_string(),      // Hyper-V virtual switches
+        "vethernet".to_string(),    // Hyper-V virtual ethernet
+        "docker".to_string(),       // Docker bridge networks
+    ]
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

@@ -85,8 +85,20 @@ struct WebRtcInner {
     input_peer: Mutex<Option<Arc<RTCPeerConnection>>>,
     // Stats channel on input peer (preferred in hybrid mode)
     input_stats_channel: Mutex<Option<Arc<RTCDataChannel>>>,
-    // Store config for creating input peer
+    // Store config for creating input peer (includes port range, network types, etc.)
     rtc_config: RTCConfiguration,
+    webrtc_config: WebRtcConfig,
+    // Track last keepalive response time (for client-created keepalive channel)
+    last_keepalive_response: Mutex<Instant>,
+    // Track pings sent without pong response (for asymmetric connectivity detection)
+    keepalive_pings_without_pong: Mutex<u32>,
+    // Offer batching - delay offer to allow multiple track additions to be batched
+    offer_batch_deadline: Arc<Mutex<Option<Instant>>>,
+    offer_batch_task_running: Arc<Mutex<bool>>,
+    // Connection sequencing - delay input peer creation until primary is connected
+    input_peer_pending: Mutex<bool>,
+    // Track if primary peer has reached Connected state
+    primary_peer_connected: Mutex<bool>,
 }
 
 pub async fn new(
@@ -106,8 +118,29 @@ pub async fn new(
     };
     let mut api_settings = SettingEngine::default();
 
+    // Configure ICE timeouts - give more time for recovery
+    // disconnected_timeout: How long to wait before transitioning from Disconnected to Failed
+    // keepalive_interval: How often to send STUN binding requests to keep NAT mappings alive
+    // failed_timeout: (Note: this is set via disconnected_timeout in the API)
+    api_settings.set_ice_timeouts(
+        Some(std::time::Duration::from_secs(60)),  // disconnected_timeout - 60s to allow recovery
+        Some(std::time::Duration::from_millis(500)), // keepalive_interval - more aggressive keepalives
+        Some(std::time::Duration::from_secs(120)), // failed_timeout - 2 minutes before giving up
+    );
+    info!("[WebRTC]: ICE timeouts configured - disconnected: 60s, keepalive: 500ms, failed: 120s");
+
+    // Port range isolation: Primary peer uses the LOWER HALF of the configured port range
+    // Input peer (hybrid mode) uses the UPPER HALF - prevents STUN/ICE conflicts
     if let Some(PortRange { min, max }) = config.port_range {
-        match EphemeralUDP::new(min, max) {
+        let range_size = max - min;
+        let midpoint = min + (range_size / 2);
+        let primary_min = min;
+        let primary_max = midpoint;
+        
+        info!("[WebRTC]: Port range isolation - primary peer using ports {}-{} (input peer will use {}-{})", 
+              primary_min, primary_max, midpoint + 1, max);
+        
+        match EphemeralUDP::new(primary_min, primary_max) {
             Ok(udp) => {
                 api_settings.set_udp_network(UDPNetwork::Ephemeral(udp));
             }
@@ -172,6 +205,7 @@ pub async fn new(
 
     // Clone config for potential input peer creation later
     let rtc_config_clone = rtc_config.clone();
+    let webrtc_config_clone = config.clone();
     
     let peer = Arc::new(api.new_peer_connection(rtc_config).await?);
 
@@ -199,6 +233,13 @@ pub async fn new(
         input_peer: Mutex::new(None),
         input_stats_channel: Mutex::new(None),
         rtc_config: rtc_config_clone,
+        webrtc_config: webrtc_config_clone,
+        last_keepalive_response: Mutex::new(Instant::now()),
+        keepalive_pings_without_pong: Mutex::new(0),
+        offer_batch_deadline: Arc::new(Mutex::new(None)),
+        offer_batch_task_running: Arc::new(Mutex::new(false)),
+        input_peer_pending: Mutex::new(false),
+        primary_peer_connected: Mutex::new(false),
     });
 
     let this = Arc::downgrade(&this_owned);
@@ -233,6 +274,8 @@ pub async fn new(
         },
     ));
 
+    // Note: Keepalive channel is created by client and handled in on_data_channel
+    
     drop(peer);
 
     Ok((
@@ -302,10 +345,70 @@ fn create_channel_message_handler(
 
 impl WebRtcInner {
     // -- Handle Connection State
-    async fn on_ice_connection_state_change(self: &Arc<Self>, _state: RTCIceConnectionState) {}
+    async fn on_ice_connection_state_change(self: &Arc<Self>, state: RTCIceConnectionState) {
+        // Log ICE connection state changes with detailed info
+        info!("[ICE]: Connection state changed: {:?}", state);
+        
+        match state {
+            RTCIceConnectionState::New => {
+                info!("[ICE]: New - ICE agent is gathering candidates");
+            }
+            RTCIceConnectionState::Checking => {
+                info!("[ICE]: Checking - ICE agent is checking candidate pairs");
+            }
+            RTCIceConnectionState::Connected => {
+                info!("[ICE]: Connected - At least one candidate pair has succeeded");
+            }
+            RTCIceConnectionState::Completed => {
+                info!("[ICE]: Completed - ICE checks have finished and candidate pair selected");
+            }
+            RTCIceConnectionState::Disconnected => {
+                warn!("[ICE]: Disconnected - STUN keepalives not being acknowledged by peer!");
+                warn!("[ICE]: This usually means the client stopped responding to STUN binding requests");
+                warn!("[ICE]: Server will continue trying for 60s before declaring failure");
+            }
+            RTCIceConnectionState::Failed => {
+                error!("[ICE]: Failed - All candidate pairs have failed. Connection unrecoverable.");
+            }
+            RTCIceConnectionState::Closed => {
+                info!("[ICE]: Closed - ICE agent has been closed");
+            }
+            _ => {
+                info!("[ICE]: Unknown state: {:?}", state);
+            }
+        }
+    }
+    
     async fn on_peer_connection_state_change(self: Arc<Self>, state: RTCPeerConnectionState) {
+        info!("[WebRTC] Peer connection state changed: {:?}", state);
+        
         #[allow(clippy::collapsible_if)]
         if matches!(state, RTCPeerConnectionState::Connected) {
+            info!("[WebRTC] Connection established - clearing any pending termination");
+            self.clear_terminate_request().await;
+            
+            // Mark primary peer as connected
+            {
+                let mut connected = self.primary_peer_connected.lock().await;
+                *connected = true;
+            }
+            
+            // Check if input peer creation was pending (hybrid mode sequencing)
+            let should_create_input_peer = {
+                let mut pending = self.input_peer_pending.lock().await;
+                if *pending {
+                    *pending = false;
+                    true
+                } else {
+                    false
+                }
+            };
+            
+            if should_create_input_peer {
+                info!("[WebRTC] Primary peer connected - now creating pending input peer (connection sequencing)");
+                self.clone().create_input_peer().await;
+            }
+            
             if let Err(err) = self
                 .event_sender
                 .send(TransportEvent::StartStream {
@@ -316,16 +419,23 @@ impl WebRtcInner {
                 warn!("Failed to send peer connected event to stream: {err:?}");
             }
         } else if matches!(state, RTCPeerConnectionState::Closed) {
+            info!("[WebRTC] Connection CLOSED - this is fatal, terminating");
             if let Err(err) = self.event_sender.send(TransportEvent::Closed).await {
                 warn!("Failed to send peer closed event to stream: {err:?}");
                 self.request_terminate().await;
             };
-        } else if matches!(
-            state,
-            RTCPeerConnectionState::Failed | RTCPeerConnectionState::Disconnected
-        ) {
+        } else if matches!(state, RTCPeerConnectionState::Failed) {
+            // Only Failed is fatal - Disconnected can recover via ICE restart
+            warn!("[WebRTC] Connection FAILED - this is fatal, requesting termination");
             self.request_terminate().await;
+        } else if matches!(state, RTCPeerConnectionState::Disconnected) {
+            // Disconnected is NOT fatal - ICE can recover
+            // Don't request termination, just log it
+            warn!("[WebRTC] Connection DISCONNECTED - waiting for ICE recovery (not fatal)");
+            // Do NOT call request_terminate() here - let ICE try to recover
         } else {
+            // For other states (New, Connecting), clear any pending termination
+            info!("[WebRTC] Connection state: {:?} - clearing termination request", state);
             self.clear_terminate_request().await;
         }
     }
@@ -371,7 +481,152 @@ impl WebRtcInner {
 
         true
     }
+    /// Request to send an offer, with batching to prevent duplicate offers
+    /// when multiple tracks are added in quick succession.
+    /// 
+    /// This uses a deadline-based batching approach:
+    /// - First call sets a deadline 300ms in the future
+    /// - Subsequent calls extend the deadline by 100ms (up to max 500ms from first call)
+    /// - Offer is sent when deadline is reached
+    /// - This ensures all tracks added within the batch window are included
     async fn send_offer(&self) -> bool {
+        const INITIAL_BATCH_DELAY_MS: u64 = 300; // Initial delay to wait for more tracks
+        const EXTENSION_MS: u64 = 100; // Extend deadline by this much for each new request
+        const MAX_TOTAL_DELAY_MS: u64 = 500; // Maximum total delay from first request
+        
+        let now = Instant::now();
+        
+        let should_start_task: bool;
+        {
+            let mut deadline = self.offer_batch_deadline.lock().await;
+            let mut task_running = self.offer_batch_task_running.lock().await;
+            
+            if let Some(current_deadline) = *deadline {
+                // Already have a pending batch - extend the deadline if possible
+                let time_since_first = now.duration_since(current_deadline - Duration::from_millis(INITIAL_BATCH_DELAY_MS));
+                if time_since_first < Duration::from_millis(MAX_TOTAL_DELAY_MS - EXTENSION_MS) {
+                    let new_deadline = now + Duration::from_millis(EXTENSION_MS);
+                    if new_deadline > current_deadline {
+                        *deadline = Some(new_deadline);
+                        info!("[Signaling]: Extended offer batch deadline by {}ms (now {:?} from now)", 
+                            EXTENSION_MS, new_deadline.duration_since(now));
+                    }
+                } else {
+                    info!("[Signaling]: Offer batch at max delay, not extending further");
+                }
+                should_start_task = false;
+            } else {
+                // No pending batch - start a new one
+                let new_deadline = now + Duration::from_millis(INITIAL_BATCH_DELAY_MS);
+                *deadline = Some(new_deadline);
+                should_start_task = !*task_running;
+                if should_start_task {
+                    *task_running = true;
+                }
+                info!("[Signaling]: Starting new offer batch, will send in {}ms", INITIAL_BATCH_DELAY_MS);
+            }
+        }
+        
+        if should_start_task {
+            // Start the batch task
+            let peer = self.peer.clone();
+            let event_sender = self.event_sender.clone();
+            let offer_batch_deadline = self.offer_batch_deadline.clone();
+            let offer_batch_task_running = self.offer_batch_task_running.clone();
+            
+            tokio::spawn(async move {
+                loop {
+                    // Check deadline and sleep until it's reached
+                    let sleep_duration = {
+                        let deadline = offer_batch_deadline.lock().await;
+                        match *deadline {
+                            Some(d) => {
+                                let now = Instant::now();
+                                if d > now {
+                                    d.duration_since(now)
+                                } else {
+                                    Duration::ZERO
+                                }
+                            }
+                            None => {
+                                // Deadline was cleared, abort
+                                let mut task_running = offer_batch_task_running.lock().await;
+                                *task_running = false;
+                                return;
+                            }
+                        }
+                    };
+                    
+                    if sleep_duration > Duration::ZERO {
+                        sleep(sleep_duration).await;
+                    }
+                    
+                    // Check if deadline was extended while we were sleeping
+                    let should_send = {
+                        let deadline = offer_batch_deadline.lock().await;
+                        match *deadline {
+                            Some(d) => Instant::now() >= d,
+                            None => false,
+                        }
+                    };
+                    
+                    if should_send {
+                        break;
+                    }
+                }
+                
+                // Clear the deadline and send the offer
+                {
+                    let mut deadline = offer_batch_deadline.lock().await;
+                    *deadline = None;
+                }
+                
+                info!("[Signaling]: Batch deadline reached, sending offer now");
+                
+                // Send offer
+                let local_description = match peer.create_offer(None).await {
+                    Err(err) => {
+                        warn!("[Signaling]: failed to create batched offer: {err:?}");
+                        let mut task_running = offer_batch_task_running.lock().await;
+                        *task_running = false;
+                        return;
+                    }
+                    Ok(value) => value,
+                };
+
+                if let Err(err) = peer.set_local_description(local_description.clone()).await {
+                    warn!("[Signaling]: failed to set local description for batched offer: {err:?}");
+                    let mut task_running = offer_batch_task_running.lock().await;
+                    *task_running = false;
+                    return;
+                }
+
+                info!("[Signaling]: Batched offer created and set (SDP length: {} bytes)", local_description.sdp.len());
+
+                if let Err(err) = event_sender
+                    .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
+                        StreamServerMessage::WebRtc(StreamSignalingMessage::Description(
+                            RtcSessionDescription {
+                                ty: from_webrtc_sdp(local_description.sdp_type),
+                                sdp: local_description.sdp,
+                            },
+                        )),
+                    )))
+                    .await
+                {
+                    warn!("Failed to send batched offer via web socket: {err:?}");
+                }
+                
+                let mut task_running = offer_batch_task_running.lock().await;
+                *task_running = false;
+            });
+        }
+        
+        true
+    }
+    
+    /// Actually send the offer (internal implementation)
+    async fn send_offer_immediate(&self) -> bool {
         let local_description = match self.peer.create_offer(None).await {
             Err(err) => {
                 warn!("[Signaling]: failed to create offer: {err:?}");
@@ -389,6 +644,10 @@ impl WebRtcInner {
             return false;
         }
 
+        info!(
+            "[Signaling]: Offer created and set as local description (SDP length: {} bytes)",
+            local_description.sdp.len()
+        );
         debug!(
             "[Signaling] Sending Local Description as Offer: {:?}",
             local_description.sdp
@@ -562,8 +821,153 @@ impl WebRtcInner {
                     TransportChannel(InboundPacket::CONTROLLER_CHANNELS[id]),
                 ));
             }
-            _ => {}
+            "keepalive" => {
+                // Handle client-created keepalive channel
+                info!("[Keepalive]: Received keepalive channel from client");
+                
+                let inner_weak = inner.clone();
+                let channel_clone = channel.clone();
+                
+                // Set up message handler for client pings
+                channel.on_message(Box::new(move |msg: DataChannelMessage| {
+                    let inner = inner_weak.clone();
+                    let channel = channel_clone.clone();
+                    Box::pin(async move {
+                        let Some(inner) = inner.upgrade() else {
+                            return;
+                        };
+                        inner.handle_client_keepalive(channel, msg).await;
+                    })
+                }));
+                
+                // Start sending pings on this channel
+                let inner_weak = Arc::downgrade(&self);
+                let channel_for_ping = channel.clone();
+                let event_sender = self.event_sender.clone();
+                spawn(async move {
+                    // Wait for channel to be ready
+                    sleep(Duration::from_secs(1)).await;
+                    
+                    // Asymmetric connectivity detection threshold:
+                    // If we've sent 3 pings (9 seconds) without receiving a pong,
+                    // declare the connection dead. This catches cases where server->client
+                    // path works but client->server path is broken.
+                    const MAX_PINGS_WITHOUT_PONG: u32 = 3;
+                    
+                    loop {
+                        let Some(inner) = inner_weak.upgrade() else {
+                            info!("[Keepalive]: Inner dropped, stopping client keepalive task");
+                            break;
+                        };
+                        
+                        if channel_for_ping.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis();
+                            let ping_msg = format!(r#"{{"type":"ping","ts":{}}}"#, timestamp);
+                            
+                            // Increment pings without pong counter BEFORE sending
+                            let pings_without_pong = {
+                                let mut counter = inner.keepalive_pings_without_pong.lock().await;
+                                *counter += 1;
+                                *counter
+                            };
+                            
+                            if let Err(err) = channel_for_ping.send_text(ping_msg).await {
+                                warn!("[Keepalive]: Failed to send ping to client: {err:?}");
+                            } else {
+                                debug!("[Keepalive]: Sent ping #{} to client at {}", pings_without_pong, timestamp);
+                            }
+                            
+                            // Check for asymmetric connectivity (server can send, client can't respond)
+                            if pings_without_pong >= MAX_PINGS_WITHOUT_PONG {
+                                let last_response = inner.last_keepalive_response.lock().await;
+                                let elapsed = last_response.elapsed();
+                                drop(last_response);
+                                
+                                warn!("[Keepalive]: ASYMMETRIC CONNECTIVITY DETECTED!");
+                                warn!("[Keepalive]: Sent {} pings without receiving any pong response", pings_without_pong);
+                                warn!("[Keepalive]: Last pong was {:?} ago - client->server path appears broken", elapsed);
+                                warn!("[Keepalive]: Requesting termination due to one-way connectivity loss");
+                                
+                                // Request termination - the connection is effectively dead
+                                // even though ICE might still think it's connected
+                                inner.request_terminate().await;
+                                
+                                // Also send a close event to the server
+                                let _ = event_sender
+                                    .send(TransportEvent::Closed)
+                                    .await;
+                                
+                                break;
+                            }
+                            
+                            // Also log standard timeout warning
+                            let last_response = inner.last_keepalive_response.lock().await;
+                            let elapsed = last_response.elapsed();
+                            drop(last_response);
+                            
+                            if elapsed > Duration::from_secs(10) {
+                                warn!("[Keepalive]: No client keepalive response for {:?} - connection may be dead (pings without pong: {})", 
+                                    elapsed, pings_without_pong);
+                            }
+                        } else {
+                            debug!("[Keepalive]: Channel not open yet, state: {:?}", channel_for_ping.ready_state());
+                        }
+                        
+                        sleep(Duration::from_secs(3)).await;
+                    }
+                });
+            }
+            _ => {
+                debug!("[DataChannel]: Ignoring unknown channel: {}", label);
+            }
         };
+    }
+    
+    async fn handle_client_keepalive(&self, channel: Arc<RTCDataChannel>, msg: DataChannelMessage) {
+        let data = match std::str::from_utf8(&msg.data) {
+            Ok(s) => s,
+            Err(_) => {
+                warn!("[Keepalive]: Received non-UTF8 keepalive message from client");
+                return;
+            }
+        };
+        
+        if data.contains(r#""type":"ping""#) {
+            // Respond with pong
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let pong_msg = format!(r#"{{"type":"pong","ts":{}}}"#, timestamp);
+            
+            if let Err(err) = channel.send_text(pong_msg).await {
+                warn!("[Keepalive]: Failed to send pong to client: {err:?}");
+            } else {
+                debug!("[Keepalive]: Received client ping, sent pong");
+            }
+        } else if data.contains(r#""type":"pong""#) {
+            // Reset the pings-without-pong counter - client->server path is working
+            let prev_count = {
+                let mut counter = self.keepalive_pings_without_pong.lock().await;
+                let prev = *counter;
+                *counter = 0;
+                prev
+            };
+            
+            let mut last_response = self.last_keepalive_response.lock().await;
+            let elapsed = last_response.elapsed();
+            *last_response = Instant::now();
+            
+            if prev_count > 1 {
+                info!("[Keepalive]: Received client pong after {} missed pings (round-trip: {:?}) - connectivity restored", 
+                    prev_count, elapsed);
+            } else {
+                debug!("[Keepalive]: Received client pong (round-trip: {:?})", elapsed);
+            }
+        }
     }
 
     async fn close_stats(&self) {
@@ -574,10 +978,70 @@ impl WebRtcInner {
 
     // -- Input Peer (Hybrid Mode)
     async fn create_input_peer(self: &Arc<Self>) {
-        info!("[InputPeer]: Creating input-only peer connection");
+        info!("[InputPeer]: Creating input-only peer connection with isolated port range");
 
         // Create a new peer connection for input only (no media)
-        let api = APIBuilder::new().build();
+        // IMPORTANT: Configure with proper settings to match primary peer AND use isolated port range
+        let mut api_settings = SettingEngine::default();
+        
+        // Configure ICE timeouts - MUST match primary peer for consistent behavior
+        api_settings.set_ice_timeouts(
+            Some(std::time::Duration::from_secs(60)),   // disconnected_timeout - 60s to allow recovery
+            Some(std::time::Duration::from_millis(500)), // keepalive_interval - more aggressive keepalives
+            Some(std::time::Duration::from_secs(120)),  // failed_timeout - 2 minutes before giving up
+        );
+        info!("[InputPeer]: ICE timeouts configured - disconnected: 60s, keepalive: 500ms, failed: 120s");
+
+        // Port range isolation: Use the UPPER HALF of the configured port range for input peer
+        // Primary peer uses lower half, input peer uses upper half - prevents port conflicts
+        if let Some(PortRange { min, max }) = self.webrtc_config.port_range.as_ref() {
+            let range_size = max - min;
+            let midpoint = min + (range_size / 2);
+            let input_min = midpoint + 1;  // Input peer uses upper half
+            let input_max = *max;
+            
+            info!("[InputPeer]: Port range isolation - using ports {}-{} (primary uses {}-{})", 
+                  input_min, input_max, min, midpoint);
+            
+            match EphemeralUDP::new(input_min, input_max) {
+                Ok(udp) => {
+                    api_settings.set_udp_network(UDPNetwork::Ephemeral(udp));
+                }
+                Err(err) => {
+                    warn!("[InputPeer]: Failed to configure port range {}-{}: {err:?}", input_min, input_max);
+                }
+            }
+        } else {
+            // No port range configured - use default ephemeral ports
+            // This is less ideal but will work; log a warning
+            warn!("[InputPeer]: No port range configured - using default ephemeral ports (may cause conflicts)");
+        }
+
+        // Network types - match primary peer configuration
+        api_settings.set_network_types(
+            self.webrtc_config
+                .network_types
+                .iter()
+                .copied()
+                .map(into_webrtc_network_type)
+                .collect(),
+        );
+        
+        // Loopback candidates - match primary peer configuration
+        api_settings.set_include_loopback_candidate(self.webrtc_config.include_loopback_candidates);
+        
+        // NAT 1:1 mapping - match primary peer configuration
+        if let Some(mapping) = self.webrtc_config.nat_1to1.as_ref() {
+            api_settings.set_nat_1to1_ips(
+                mapping.ips.clone(),
+                into_webrtc_ice_candidate(mapping.ice_candidate_type),
+            );
+        }
+
+        // Build API with configured settings (no media engine needed for data-only peer)
+        let api = APIBuilder::new()
+            .with_setting_engine(api_settings)
+            .build();
 
         let input_peer = match api.new_peer_connection(self.rtc_config.clone()).await {
             Ok(peer) => Arc::new(peer),
@@ -586,6 +1050,8 @@ impl WebRtcInner {
                 return;
             }
         };
+        
+        info!("[InputPeer]: Input peer connection created successfully with isolated configuration");
 
         let inner = Arc::downgrade(self);
 
@@ -1105,8 +1571,18 @@ impl TransportSender for WebRTCTransportSender {
                 self.inner.on_ws_message(message).await;
             }
             ServerIpcMessage::InputJoined => {
-                info!("[WebRTC]: Input connection joined - creating input peer");
-                self.inner.clone().create_input_peer().await;
+                // Connection sequencing: Only create input peer after primary peer is connected
+                // This prevents ICE agent conflicts during simultaneous peer setup
+                let primary_connected = *self.inner.primary_peer_connected.lock().await;
+                
+                if primary_connected {
+                    info!("[WebRTC]: Input connection joined - primary peer already connected, creating input peer immediately");
+                    self.inner.clone().create_input_peer().await;
+                } else {
+                    info!("[WebRTC]: Input connection joined - primary peer not yet connected, deferring input peer creation (connection sequencing)");
+                    let mut pending = self.inner.input_peer_pending.lock().await;
+                    *pending = true;
+                }
             }
             ServerIpcMessage::InputWebSocket(signaling) => {
                 debug!("[WebRTC]: Received input signaling message");

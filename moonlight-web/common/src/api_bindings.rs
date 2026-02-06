@@ -20,6 +20,17 @@ pub struct ConfigJs {
     pub path_prefix: String,
 }
 
+/// Response from the unauthenticated server-info endpoint.
+/// Used by clients during discovery to identify a server before authentication.
+#[derive(Serialize, Deserialize, Debug, TS, Clone)]
+#[ts(export, export_to = EXPORT_PATH)]
+pub struct ServerInfoResponse {
+    /// Unique server identifier (stable across restarts and IP changes)
+    pub server_id: Option<String>,
+    /// Whether authentication is required to use this server
+    pub auth_required: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug, TS, Clone)]
 #[ts(export, export_to = EXPORT_PATH)]
 pub struct PostLoginRequest {
@@ -35,6 +46,11 @@ pub struct PostLoginResponse {
     pub session_token: String,
     /// Remote access info for connecting to this server from the internet
     pub remote_access: Option<RemoteAccessInfo>,
+    /// Unique server identifier for client-side credential caching.
+    /// Clients should use this as the cache key instead of IP address,
+    /// since the server's IP may change across sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, TS, Clone, Copy)]

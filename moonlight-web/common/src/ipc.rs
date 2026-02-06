@@ -44,6 +44,10 @@ pub enum ServerIpcMessage {
         /// Only set when hybrid_mode is enabled in stream_settings.
         #[serde(default)]
         session_token: Option<String>,
+        /// Launch mode: "launch" for new game, "resume" for existing game.
+        /// Determined by Fuji orchestrator. Streamer should NOT check current_game.
+        #[serde(default)]
+        launch_mode: Option<String>,
     },
     WebSocket(StreamClientMessage),
     /// Input connection has joined (hybrid mode)

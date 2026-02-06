@@ -326,13 +326,108 @@ async fn wake_host(
 
 #[get("/apps")]
 async fn get_apps(
+    app: Data<App>,
     mut user: AuthenticatedUser,
     Query(query): Query<GetAppsQuery>,
 ) -> Result<Json<GetAppsResponse>, AppError> {
-    let host_id = HostId(query.host_id);
+    use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
+    use crate::app::AppMapping;
+    use log::info;
 
+    let host_id = HostId(query.host_id);
     let mut host = user.host(host_id).await?;
 
+    // When embedded in Fuji, we need to:
+    // 1. Get current Sunshine ports from Fuji (handles dynamic port changes)
+    // 2. Update host connection if ports changed
+    // 3. Call host.list_apps() via Moonlight protocol (gets REAL Sunshine IDs)
+    // 4. Get fuji_game_id by title matching with Fuji's game list
+    if is_embedded_in_fuji().await {
+        info!("[Apps]: Embedded in Fuji, using dynamic port detection");
+        
+        // Step 1: Get current Sunshine ports from Fuji
+        let (http_port, _https_port) = match fuji_client().get_sunshine_ports().await {
+            Ok(ports) => {
+                info!("[Apps]: Got Sunshine ports from Fuji - HTTP: {}, HTTPS: {}", ports.0, ports.1);
+                ports
+            }
+            Err(e) => {
+                warn!("[Apps]: Failed to get Sunshine ports from Fuji: {:?}, using stored ports", e);
+                // Fall through to use stored ports
+                (0, 0)
+            }
+        };
+
+        // Step 2: Update host port if we got new ports and they differ
+        // Note: This updates the host's stored address for this request
+        if http_port > 0 {
+            if let Err(e) = host.update_port(http_port).await {
+                warn!("[Apps]: Failed to update host port: {:?}", e);
+            }
+        }
+
+        // Step 3: Get apps via Moonlight protocol (REAL Sunshine IDs)
+        let sunshine_apps = match host.list_apps(&mut user).await {
+            Ok(apps) => {
+                info!("[Apps]: Got {} apps from Sunshine via Moonlight protocol", apps.len());
+                apps
+            }
+            Err(e) => {
+                warn!("[Apps]: Failed to get apps from Sunshine: {:?}", e);
+                return Err(e.into());
+            }
+        };
+
+        // Step 4: Get Fuji games for title matching (to get fuji_game_id)
+        let fuji_games = fuji_client().get_games(None, None).await.ok();
+        let fuji_games_list = fuji_games.as_ref().map(|fg| &fg.games);
+        
+        if let Some(games) = fuji_games_list {
+            info!("[Apps]: Got {} games from Fuji for title matching", games.len());
+        }
+
+        // Step 5: Build mapping by matching titles (best guess approach)
+        let mappings: Vec<AppMapping> = sunshine_apps
+            .iter()
+            .map(|sunshine_app| {
+                // Try to find matching Fuji game by title (case-insensitive)
+                let fuji_match = fuji_games_list.and_then(|games| {
+                    games.iter().find(|fg| {
+                        fg.title.to_lowercase() == sunshine_app.title.to_lowercase()
+                    })
+                });
+
+                AppMapping {
+                    sunshine_app_id: sunshine_app.id.0,  // Real Sunshine ID!
+                    sunshine_title: sunshine_app.title.clone(),
+                    fuji_game_id: fuji_match.map(|fg| fg.id.clone()),
+                    fuji_title: fuji_match.map(|fg| fg.title.clone()),
+                }
+            })
+            .collect();
+
+        // Log mapping results
+        let mapped_count = mappings.iter().filter(|m| m.fuji_game_id.is_some()).count();
+        info!("[Apps]: Built mapping: {} Sunshine apps, {} matched to Fuji games", 
+              mappings.len(), mapped_count);
+
+        // Cache the mappings for later use (box art, streaming)
+        app.update_app_mappings(mappings).await;
+
+        // Return Sunshine apps with REAL IDs
+        return Ok(Json(GetAppsResponse {
+            apps: sunshine_apps
+                .into_iter()
+                .map(|app| api_bindings::App {
+                    app_id: app.id.0,  // Real Sunshine ID!
+                    title: app.title,
+                    is_hdr_supported: app.is_hdr_supported,
+                })
+                .collect(),
+        }));
+    }
+
+    // Non-Fuji mode: query Sunshine directly via stored host info
     let apps = host.list_apps(&mut user).await?;
 
     Ok(Json(GetAppsResponse {
@@ -349,12 +444,38 @@ async fn get_apps(
 
 #[get("/app/image")]
 async fn get_app_image(
+    web_app: Data<App>,
     mut user: AuthenticatedUser,
     Query(query): Query<GetAppImageQuery>,
 ) -> Result<Bytes, AppError> {
+    use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
+    use log::info;
+
     let host_id = HostId(query.host_id);
     let app_id = AppId(query.app_id);
 
+    // When embedded in Fuji, use cached mapping to get box art
+    if is_embedded_in_fuji().await {
+        // Look up the mapping from Sunshine ID → Fuji game ID
+        if let Some(fuji_game_id) = web_app.get_fuji_game_id(app_id.0).await {
+            info!("[AppImage]: Found Fuji mapping for Sunshine ID {}: {}", app_id.0, fuji_game_id);
+            
+            // Get cover from Fuji
+            match fuji_client().get_game_cover(&fuji_game_id, Some("medium")).await {
+                Ok(image_bytes) => {
+                    return Ok(Bytes::from(image_bytes));
+                }
+                Err(e) => {
+                    warn!("[AppImage]: Failed to get cover from Fuji for '{}': {:?}", fuji_game_id, e);
+                    // Fall through to Sunshine lookup
+                }
+            }
+        } else {
+            info!("[AppImage]: No Fuji mapping found for Sunshine ID {}, using Sunshine box art", app_id.0);
+        }
+    }
+
+    // Fallback: get from Sunshine (non-Fuji mode or no mapping)
     let mut host = user.host(host_id).await?;
 
     let image = host
@@ -371,7 +492,9 @@ pub fn api_service() -> impl HttpServiceFactory {
             // -- Auth
             auth::login,
             auth::logout,
-            auth::authenticate
+            auth::authenticate,
+            // -- Server Identity (unauthenticated)
+            auth::server_info,
         ])
         .service(services![
             // -- Host
@@ -390,6 +513,9 @@ pub fn api_service() -> impl HttpServiceFactory {
             // -- Stream
             stream::start_host,
             stream::cancel_host,
+            stream::get_session,
+            stream::pause_session,
+            stream::end_session,
             // -- Input (hybrid mode)
             input::input_connect,
         ])
