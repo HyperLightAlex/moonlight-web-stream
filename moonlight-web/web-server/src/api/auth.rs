@@ -8,7 +8,7 @@ use actix_web::{
     post,
     web::{Data, Json},
 };
-use common::api_bindings::{PostLoginRequest, PostLoginResponse};
+use common::api_bindings::{PostLoginRequest, PostLoginResponse, ServerInfoResponse};
 use futures::future::{Ready, ready};
 use std::{pin::Pin, time::Duration};
 
@@ -158,6 +158,7 @@ async fn login(
     let response = PostLoginResponse {
         session_token: session_str.to_string(),
         remote_access,
+        server_id: app.config().server_id.clone(),
     };
 
     Ok(HttpResponse::Ok()
@@ -200,6 +201,18 @@ pub async fn auth_middleware(
             .add_removal_cookie(&build_cookie(&app, Duration::ZERO, ""))?;
     }
 
+    // Enrich 401 responses with server_id so clients can identify this server
+    // even when authentication fails (e.g., expired session, changed IP)
+    if response.response().status() == actix_web::http::StatusCode::UNAUTHORIZED {
+        if let Some(server_id) = &app.config().server_id {
+            response.response_mut().headers_mut().insert(
+                actix_web::http::header::HeaderName::from_static("x-server-id"),
+                actix_web::http::header::HeaderValue::from_str(server_id)
+                    .unwrap_or_else(|_| actix_web::http::header::HeaderValue::from_static("")),
+            );
+        }
+    }
+
     Ok(response)
 }
 
@@ -226,6 +239,18 @@ async fn authenticate(
 ) -> HttpResponse {
     let response = AuthenticateResponse {
         remote_access: remote_provider.get_info(),
+    };
+    HttpResponse::Ok().json(response)
+}
+
+/// Unauthenticated endpoint for server identity discovery.
+/// Returns the server's unique ID so clients can match it to cached credentials
+/// before attempting authentication.
+#[get("/server-info")]
+async fn server_info(app: Data<App>) -> HttpResponse {
+    let response = ServerInfoResponse {
+        server_id: app.config().server_id.clone(),
+        auth_required: app.config().web_server.default_user_id.is_none(),
     };
     HttpResponse::Ok().json(response)
 }

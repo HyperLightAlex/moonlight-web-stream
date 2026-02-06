@@ -492,7 +492,9 @@ pub fn api_service() -> impl HttpServiceFactory {
             // -- Auth
             auth::login,
             auth::logout,
-            auth::authenticate
+            auth::authenticate,
+            // -- Server Identity (unauthenticated)
+            auth::server_info,
         ])
         .service(services![
             // -- Host
