@@ -81,6 +81,8 @@ pub async fn start_host(
             video_colorspace,
             video_color_range_full,
             hybrid_mode,
+            hdr,
+            sops,
         } = message
         else {
             let _ = session.close(None).await;
@@ -125,6 +127,8 @@ pub async fn start_host(
             video_colorspace: video_colorspace.into(),
             video_color_range_full,
             hybrid_mode,
+            hdr,
+            sops,
         };
 
         // -- Collect host data

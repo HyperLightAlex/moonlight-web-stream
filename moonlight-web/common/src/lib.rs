@@ -24,6 +24,18 @@ pub struct StreamSettings {
     /// The server should NOT create input data channels on the primary connection.
     #[serde(default)]
     pub hybrid_mode: bool,
+    /// HDR mode. When true, requests HDR encoding from Sunshine.
+    /// Will fail if the host does not support HDR.
+    #[serde(default)]
+    pub hdr: bool,
+    /// Sunshine Optimal Playback Settings (SOPS).
+    /// When true, Sunshine may adjust resolution/fps to optimize for the game.
+    #[serde(default = "default_sops")]
+    pub sops: bool,
+}
+
+fn default_sops() -> bool {
+    true
 }
 
 pub fn serialize_json<T>(message: &T) -> Option<String>

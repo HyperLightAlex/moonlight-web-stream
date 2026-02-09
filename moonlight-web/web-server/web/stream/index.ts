@@ -126,6 +126,8 @@ export class Stream implements Component {
                 video_colorspace: "Rec709", // TODO <---
                 video_color_range_full: true, // TODO <---
                 hybrid_mode: this.hybridMode,
+                hdr: this.settings.hdr,
+                sops: this.settings.sops,
             }
         })
 

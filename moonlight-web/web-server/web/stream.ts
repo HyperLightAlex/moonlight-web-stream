@@ -8,8 +8,8 @@ import { getSidebarRoot, setSidebar, setSidebarExtended, setSidebarStyle, Sideba
 import { defaultStreamInputConfig, MouseMode, ScreenKeyboardSetVisibleEvent, StreamInputConfig, TouchMode } from "./stream/input.js";
 import { defaultStreamSettings, getLocalStreamSettings, StreamSettings } from "./component/settings_menu.js";
 import { SelectComponent } from "./component/input.js";
-import { emptyVideoFormats, getStandardVideoFormats, getSupportedVideoFormats, hasAnyCodec } from "./stream/video.js";
-import { StreamCapabilities, StreamKeys } from "./api_bindings.js";
+import { emptyVideoFormats, getStandardVideoFormats, getSupportedVideoFormats, hasAnyCodec, VideoCodecSupport } from "./stream/video.js";
+import { StreamCapabilities, StreamKeys, StreamSupportedVideoFormats } from "./api_bindings.js";
 import { ScreenKeyboard, TextEvent } from "./screen_keyboard.js";
 import { FormModal } from "./component/modal/form.js";
 import { streamStatsToHtml } from "./stream/stats.js";
@@ -320,6 +320,9 @@ class ViewerApp implements Component {
     private toggleFullscreenWithKeybind: boolean
     private hasShownFullscreenEscapeWarning = false
     private hybridMode: boolean
+    /** Raw video_supported_formats bitmask from URL params (mobile client).
+     *  When set, bypasses WebRTC codec detection in startStream(). */
+    private videoSupportedFormatsOverride: number | undefined = undefined
 
     constructor(api: Api, hostId: number, appId: number, hybridMode: boolean = false) {
         this.api = api
@@ -351,6 +354,51 @@ class ViewerApp implements Component {
 
         // Configure stream
         const settings = getLocalStreamSettings() ?? defaultStreamSettings()
+
+        // In hybrid mode, override settings from URL query params.
+        // Mobile clients pass stream settings as URL params since they don't
+        // control the WebSocket Init message directly — stream.html JS does.
+        if (hybridMode) {
+            const queryParams = new URLSearchParams(location.search)
+
+            const bitrateStr = queryParams.get("bitrate")
+            const fpsStr = queryParams.get("fps")
+            const widthStr = queryParams.get("width")
+            const heightStr = queryParams.get("height")
+            const hdrStr = queryParams.get("hdr")
+            const sopsStr = queryParams.get("sops")
+            const playAudioLocalStr = queryParams.get("play_audio_local")
+            const videoFormatsStr = queryParams.get("video_supported_formats")
+
+            if (bitrateStr) settings.bitrate = parseInt(bitrateStr)
+            if (fpsStr) settings.fps = parseInt(fpsStr)
+            if (widthStr && heightStr) {
+                settings.videoSize = "custom"
+                settings.videoSizeCustom = {
+                    width: parseInt(widthStr),
+                    height: parseInt(heightStr)
+                }
+            }
+            if (hdrStr !== null) settings.hdr = hdrStr === "true"
+            if (sopsStr !== null) settings.sops = sopsStr !== "false" // default true
+            if (playAudioLocalStr !== null) settings.playAudioLocal = playAudioLocalStr === "true"
+
+            // Store raw bitmask — startStream() will use it to bypass WebRTC codec detection
+            if (videoFormatsStr) {
+                this.videoSupportedFormatsOverride = parseInt(videoFormatsStr)
+            }
+
+            console.info("[Hybrid]: Stream settings from URL params:", {
+                bitrate: settings.bitrate,
+                fps: settings.fps,
+                width: settings.videoSizeCustom.width,
+                height: settings.videoSizeCustom.height,
+                hdr: settings.hdr,
+                sops: settings.sops,
+                playAudioLocal: settings.playAudioLocal,
+                videoSupportedFormatsOverride: this.videoSupportedFormatsOverride,
+            })
+        }
 
         let browserWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
         let browserHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
@@ -418,55 +466,66 @@ class ViewerApp implements Component {
             edge: settings.sidebarEdge,
         })
 
-        let supportedVideoFormats = await getSupportedVideoFormats()
-        if (settings.videoCodec == "h264") {
-            const newSupportedVideoFormats = emptyVideoFormats()
+        let supportedVideoFormats: VideoCodecSupport
 
-            newSupportedVideoFormats.H264 = supportedVideoFormats.H264
-            newSupportedVideoFormats.H264_HIGH8_444 = supportedVideoFormats.H264_HIGH8_444
-
-            if (settings.videoForceCodec) {
-                newSupportedVideoFormats.H264 = true
-            }
-
-            supportedVideoFormats = newSupportedVideoFormats
-        } else if (settings.videoCodec == "h265") {
-            const newSupportedVideoFormats = emptyVideoFormats()
-
-            newSupportedVideoFormats.H265 = supportedVideoFormats.H265
-            newSupportedVideoFormats.H265_MAIN10 = supportedVideoFormats.H265_MAIN10
-            newSupportedVideoFormats.H265_REXT8_444 = supportedVideoFormats.H265_REXT8_444
-            newSupportedVideoFormats.H265_REXT10_444 = supportedVideoFormats.H265_REXT10_444
-
-            if (settings.videoForceCodec) {
-                newSupportedVideoFormats.H265 = true
-            }
-
-            supportedVideoFormats = newSupportedVideoFormats
-        } else if (settings.videoCodec == "av1") {
-            const newSupportedVideoFormats = emptyVideoFormats()
-
-            newSupportedVideoFormats.AV1 = supportedVideoFormats.AV1
-            newSupportedVideoFormats.AV1_MAIN8 = supportedVideoFormats.AV1_MAIN8
-            newSupportedVideoFormats.AV1_MAIN10 = supportedVideoFormats.AV1_MAIN10
-            newSupportedVideoFormats.AV1_REXT8_444 = supportedVideoFormats.AV1_REXT8_444
-            newSupportedVideoFormats.AV1_REXT10_444 = supportedVideoFormats.AV1_REXT10_444
-
-            if (settings.videoForceCodec) {
-                newSupportedVideoFormats.AV1 = true
-            }
-
-            supportedVideoFormats = newSupportedVideoFormats
-        } else if (settings.videoCodec == "auto") {
-            // do nothing
-        }
-
-        if (!settings.videoForceCodec) {
-            // TODO: make this and the standard supported video formats
-            supportedVideoFormats.H264 = true
+        if (this.videoSupportedFormatsOverride !== undefined) {
+            // Mobile client provided a raw bitmask via URL params.
+            // The mobile app has already probed its device's decoder capabilities
+            // and encoded them into the bitmask — use it directly.
+            supportedVideoFormats = bitmaskToVideoFormats(this.videoSupportedFormatsOverride)
+            console.info(`[Hybrid]: Using video_supported_formats from URL: ${this.videoSupportedFormatsOverride}`, supportedVideoFormats)
         } else {
-            // TODO: use logger
-            console.info(`Forcing the video codec!`)
+            // Normal web client: detect codecs via WebRTC and filter by user preference
+            supportedVideoFormats = await getSupportedVideoFormats()
+            if (settings.videoCodec == "h264") {
+                const newSupportedVideoFormats = emptyVideoFormats()
+
+                newSupportedVideoFormats.H264 = supportedVideoFormats.H264
+                newSupportedVideoFormats.H264_HIGH8_444 = supportedVideoFormats.H264_HIGH8_444
+
+                if (settings.videoForceCodec) {
+                    newSupportedVideoFormats.H264 = true
+                }
+
+                supportedVideoFormats = newSupportedVideoFormats
+            } else if (settings.videoCodec == "h265") {
+                const newSupportedVideoFormats = emptyVideoFormats()
+
+                newSupportedVideoFormats.H265 = supportedVideoFormats.H265
+                newSupportedVideoFormats.H265_MAIN10 = supportedVideoFormats.H265_MAIN10
+                newSupportedVideoFormats.H265_REXT8_444 = supportedVideoFormats.H265_REXT8_444
+                newSupportedVideoFormats.H265_REXT10_444 = supportedVideoFormats.H265_REXT10_444
+
+                if (settings.videoForceCodec) {
+                    newSupportedVideoFormats.H265 = true
+                }
+
+                supportedVideoFormats = newSupportedVideoFormats
+            } else if (settings.videoCodec == "av1") {
+                const newSupportedVideoFormats = emptyVideoFormats()
+
+                newSupportedVideoFormats.AV1 = supportedVideoFormats.AV1
+                newSupportedVideoFormats.AV1_MAIN8 = supportedVideoFormats.AV1_MAIN8
+                newSupportedVideoFormats.AV1_MAIN10 = supportedVideoFormats.AV1_MAIN10
+                newSupportedVideoFormats.AV1_REXT8_444 = supportedVideoFormats.AV1_REXT8_444
+                newSupportedVideoFormats.AV1_REXT10_444 = supportedVideoFormats.AV1_REXT10_444
+
+                if (settings.videoForceCodec) {
+                    newSupportedVideoFormats.AV1 = true
+                }
+
+                supportedVideoFormats = newSupportedVideoFormats
+            } else if (settings.videoCodec == "auto") {
+                // do nothing
+            }
+
+            if (!settings.videoForceCodec) {
+                // TODO: make this and the standard supported video formats
+                supportedVideoFormats.H264 = true
+            } else {
+                // TODO: use logger
+                console.info(`Forcing the video codec!`)
+            }
         }
 
         if (!hasAnyCodec(supportedVideoFormats)) {
@@ -1144,6 +1203,25 @@ class SendKeycodeModal extends FormModal<number> {
         }
 
         return parseInt(keyString)
+    }
+}
+
+/**
+ * Convert a raw video_supported_formats bitmask (from mobile URL params)
+ * to a VideoCodecSupport object used by the Stream constructor.
+ */
+function bitmaskToVideoFormats(mask: number): VideoCodecSupport {
+    return {
+        H264: (mask & StreamSupportedVideoFormats.H264) !== 0,
+        H264_HIGH8_444: (mask & StreamSupportedVideoFormats.H264_HIGH8_444) !== 0,
+        H265: (mask & StreamSupportedVideoFormats.H265) !== 0,
+        H265_MAIN10: (mask & StreamSupportedVideoFormats.H265_MAIN10) !== 0,
+        H265_REXT8_444: (mask & StreamSupportedVideoFormats.H265_REXT8_444) !== 0,
+        H265_REXT10_444: (mask & StreamSupportedVideoFormats.H265_REXT10_444) !== 0,
+        AV1_MAIN8: (mask & StreamSupportedVideoFormats.AV1_MAIN8) !== 0,
+        AV1_MAIN10: (mask & StreamSupportedVideoFormats.AV1_MAIN10) !== 0,
+        AV1_HIGH8_444: (mask & StreamSupportedVideoFormats.AV1_HIGH8_444) !== 0,
+        AV1_HIGH10_444: (mask & StreamSupportedVideoFormats.AV1_HIGH10_444) !== 0,
     }
 }
 
