@@ -24,6 +24,8 @@ export type StreamSettings = {
     controllerConfig: ControllerConfig
     dataTransport: TransportType
     toggleFullscreenWithKeybind: boolean
+    hdr: boolean
+    sops: boolean
 }
 
 export type StreamCodec = "h264" | "auto" | "h265" | "av1"
@@ -53,7 +55,9 @@ export function defaultStreamSettings(): StreamSettings {
             sendIntervalOverride: null,
         },
         dataTransport: "auto",
-        toggleFullscreenWithKeybind: false
+        toggleFullscreenWithKeybind: false,
+        hdr: false,
+        sops: true
     }
 }
 

@@ -443,8 +443,19 @@ pub enum StreamClientMessage {
         /// and should return a session_token for the input connection to use.
         #[serde(default)]
         hybrid_mode: bool,
+        /// HDR mode. When true, requests HDR encoding from Sunshine.
+        #[serde(default)]
+        hdr: bool,
+        /// Sunshine Optimal Playback Settings (SOPS).
+        /// When true, Sunshine may adjust resolution/fps to optimize for the game.
+        #[serde(default = "default_sops")]
+        sops: bool,
     },
     WebRtc(StreamSignalingMessage),
+}
+
+fn default_sops() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Debug, TS, Clone, Default)]
