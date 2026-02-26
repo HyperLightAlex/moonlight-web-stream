@@ -57,15 +57,24 @@ cargo build --release
 
 ### 4. Copy Frontend to Output Directory
 
-The web server expects the frontend files in a `dist/` folder next to the executable:
+The web server serves the frontend from a folder next to the executable. **The folder name is chosen at compile time** (see `moonlight-web/web-server/src/web.rs`):
+
+| Build type | Folder name | Purpose |
+|------------|-------------|---------|
+| **Debug** (`cargo build`) | `dist/` | Local development |
+| **Release** (`cargo build --release`) | `static/` | Packaged/production (e.g. Fuji bundle) |
+
+Copy the frontend build output into the correct folder for your build:
 
 ```powershell
-# For debug build
+# For debug build (serves from dist/)
 Copy-Item -Path "moonlight-web\web-server\dist" -Destination "target\debug\dist" -Recurse -Force
 
-# For release build
-Copy-Item -Path "moonlight-web\web-server\dist" -Destination "target\release\dist" -Recurse -Force
+# For release build (serves from static/)
+Copy-Item -Path "moonlight-web\web-server\dist" -Destination "target\release\static" -Recurse -Force
 ```
+
+> **Note for Fuji/embedders:** The Fuji app expects the bundle to contain a **`static/`** directory (used with a release web-server.exe). When integrating a **debug** web-server.exe for local dev, the binary looks for **`dist/`**. Keep both in sync if the same bundle is used for debug and release (e.g. copy `dist` → `static` after building the frontend).
 
 ### 5. Run the Server
 
@@ -98,7 +107,7 @@ The server will start on **http://localhost:8080** by default.
 |------|----------|
 | Web Server | `target\release\web-server.exe` |
 | Streamer | `target\release\streamer.exe` |
-| Frontend Assets | `target\release\dist\` |
+| Frontend Assets | `target\release\static\` |
 | Server Config | `target\release\server\config.json` (created on first run) |
 
 ## Quick Reference Script
@@ -186,6 +195,7 @@ New-Item -ItemType Directory -Force -Path "package\moonlight-web-server" | Out-N
 Copy-Item "target\debug\web-server.exe" "package\moonlight-web-server\"
 Copy-Item "target\debug\streamer.exe" "package\moonlight-web-server\"
 Copy-Item -Recurse "target\debug\dist" "package\moonlight-web-server\"
+# If packaging a RELEASE build instead, use: Copy-Item -Recurse "target\release\static" "package\moonlight-web-server\static"
 
 # Create zip archive
 Compress-Archive -Path "package\moonlight-web-server\*" -DestinationPath "moonlight-web-server-win64.zip" -Force
@@ -200,7 +210,7 @@ The resulting `moonlight-web-server-win64.zip` contains:
 |------|---------|
 | `web-server.exe` | Main server (web UI, pairing, API) |
 | `streamer.exe` | Game streaming process (spawned by web-server) |
-| `dist/` | Frontend assets (HTML, JS, CSS) |
+| `dist/` or `static/` | Frontend assets (debug build uses `dist/`, release uses `static/`) |
 
 > ⚠️ **IMPORTANT:** Both executables must be in the same folder! The web server spawns `streamer.exe` when launching a stream.
 

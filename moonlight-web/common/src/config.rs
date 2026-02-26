@@ -301,6 +301,15 @@ pub struct WebServerConfig {
     #[serde(default = "default_bind_address")]
     pub bind_address: SocketAddr,
     pub certificate: Option<ConfigSsl>,
+    /// When set with tls_key_path and bind_address_https, server listens HTTPS-only on bind_address_https.
+    /// Cert and key are loaded from these file paths (PEM format).
+    #[serde(default)]
+    pub tls_cert_path: Option<String>,
+    #[serde(default)]
+    pub tls_key_path: Option<String>,
+    /// Bind address for HTTPS when TLS is used (e.g. "0.0.0.0:8443"). Required with tls_cert_path/tls_key_path.
+    #[serde(default)]
+    pub bind_address_https: Option<String>,
     #[serde(default)]
     pub url_path_prefix: String,
     #[serde(default = "default_session_cookie_secure")]
@@ -324,6 +333,9 @@ impl Default for WebServerConfig {
         Self {
             bind_address: default_bind_address(),
             certificate: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+            bind_address_https: None,
             url_path_prefix: "".to_string(),
             session_cookie_secure: default_session_cookie_secure(),
             session_cookie_expiration: default_session_cookie_expiration(),

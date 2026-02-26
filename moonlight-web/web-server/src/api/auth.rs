@@ -247,7 +247,11 @@ async fn authenticate(
 /// Returns the server's unique ID so clients can match it to cached credentials
 /// before attempting authentication.
 #[get("/server-info")]
-async fn server_info(app: Data<App>) -> HttpResponse {
+async fn server_info(app: Data<App>, req: HttpRequest) -> HttpResponse {
+    log::info!(
+        "[Discovery] GET /api/server-info from {}",
+        req.peer_addr().map(|a| a.to_string()).unwrap_or_else(|| "unknown".into())
+    );
     let response = ServerInfoResponse {
         server_id: app.config().server_id.clone(),
         auth_required: app.config().web_server.default_user_id.is_none(),

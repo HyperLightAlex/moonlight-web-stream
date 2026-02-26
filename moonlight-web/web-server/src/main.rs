@@ -1,11 +1,11 @@
 use common::config::Config;
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
-use std::{io::ErrorKind, path::PathBuf, str::FromStr};
+use std::{io::ErrorKind, net::SocketAddr, path::PathBuf, str::FromStr};
 use tokio::fs::{self, File};
 
 use actix_web::{
     App as ActixApp, HttpServer,
-    middleware::{self, Logger},
+    middleware::{self, Logger, NormalizePath, TrailingSlash},
     web::{Data, scope},
 };
 use log::{Level, error, info};
@@ -123,17 +123,39 @@ async fn start(config: Config) -> Result<(), anyhow::Error> {
 
     let bind_address = app.config().web_server.bind_address;
 
-    // Initialize UPnP if enabled
+    // When Fuji-style TLS config is set (file paths + HTTPS bind), listen HTTPS-only on bind_address_https
+    let use_tls_paths = app.config().web_server.tls_cert_path.as_ref().and_then(|c| {
+        app.config()
+            .web_server
+            .tls_key_path
+            .as_ref()
+            .and_then(|k| app.config().web_server.bind_address_https.as_ref().map(|b| (c, k, b)))
+    });
+
+    let (listen_address, use_https) = if let Some((cert_path, key_path, bind_https)) = use_tls_paths {
+        let addr: SocketAddr = bind_https
+            .parse()
+            .expect("invalid bind_address_https: must be host:port (e.g. 0.0.0.0:8443)");
+        info!(
+            "[Server] TLS mode: listening HTTPS-only on {} (cert: {}, key: {})",
+            addr, cert_path, key_path
+        );
+        (addr, true)
+    } else {
+        (bind_address, app.config().web_server.certificate.is_some())
+    };
+
+    // Initialize UPnP if enabled (use the port we're actually listening on)
     let (upnp_manager, upnp_status) = if config.upnp.enabled {
         let local_ip = detect_local_ip().unwrap_or_else(|| {
             info!("[UPnP] Could not detect local IP, using bind address");
-            match bind_address {
+            match listen_address {
                 std::net::SocketAddr::V4(addr) => *addr.ip(),
                 std::net::SocketAddr::V6(_) => std::net::Ipv4Addr::UNSPECIFIED,
             }
         });
 
-        let server_port = bind_address.port();
+        let server_port = listen_address.port();
         let manager = UpnpManager::new(config.upnp.clone(), server_port, local_ip);
 
         let status = match manager.initialize().await {
@@ -174,6 +196,7 @@ async fn start(config: Config) -> Result<(), anyhow::Error> {
         move || {
             let mut actix_app = ActixApp::new().service(
                 scope(&url_path_prefix)
+                    .wrap(NormalizePath::new(TrailingSlash::Trim))
                     .app_data(app.clone())
                     .app_data(remote_access_provider.clone())
                     .wrap(
@@ -205,21 +228,43 @@ async fn start(config: Config) -> Result<(), anyhow::Error> {
         }
     });
 
-    if let Some(certificate) = app.config().web_server.certificate.as_ref() {
-        info!("[Server]: Running Https Server with ssl tls");
+    if use_https {
+        info!("[Server] Running HTTPS server with TLS");
+
+        let (cert_path, key_path) = if let Some((c, k, _)) = use_tls_paths {
+            (c.clone(), k.clone())
+        } else if let Some(certificate) = app.config().web_server.certificate.as_ref() {
+            // Legacy: certificate holds paths in private_key_pem / certificate_pem fields
+            (
+                certificate.certificate_pem.clone(),
+                certificate.private_key_pem.clone(),
+            )
+        } else {
+            unreachable!("use_https but no TLS config");
+        };
 
         let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())
-            .expect("failed to create ssl tls acceptor");
-        builder
-            .set_private_key_file(&certificate.private_key_pem, SslFiletype::PEM)
-            .expect("failed to set private key");
-        builder
-            .set_certificate_chain_file(&certificate.certificate_pem)
-            .expect("failed to set certificate");
+            .expect("failed to create SSL TLS acceptor");
 
-        server.bind_openssl(bind_address, builder)?.run().await?;
+        if use_tls_paths.is_some() {
+            builder
+                .set_private_key_file(&key_path, SslFiletype::PEM)
+                .expect("failed to set private key from tls_key_path");
+            builder
+                .set_certificate_chain_file(&cert_path)
+                .expect("failed to set certificate from tls_cert_path");
+        } else {
+            builder
+                .set_private_key_file(&key_path, SslFiletype::PEM)
+                .expect("failed to set private key");
+            builder
+                .set_certificate_chain_file(&cert_path)
+                .expect("failed to set certificate");
+        }
+
+        server.bind_openssl(listen_address, builder)?.run().await?;
     } else {
-        server.bind(bind_address)?.run().await?;
+        server.bind(listen_address)?.run().await?;
     }
 
     Ok(())
