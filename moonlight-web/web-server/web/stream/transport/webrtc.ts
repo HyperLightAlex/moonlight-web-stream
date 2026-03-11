@@ -34,13 +34,6 @@ export class WebRTCTransport implements Transport {
 
         this.peer.addEventListener("track", this.onTrack.bind(this))
 
-        // Reserve the audio media section in the initial offer so the server can bind
-        // the real audio track later without forcing a second SDP exchange.
-        //
-        // Video stays on the legacy add-track path for now because the actual Sunshine
-        // video codec is only known once the stream starts.
-        this.peer.addTransceiver("audio", { direction: "recvonly" })
-
         this.initChannels()
 
         // Maybe we already received data

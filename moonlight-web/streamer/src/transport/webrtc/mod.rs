@@ -35,7 +35,10 @@ use webrtc::{
         APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
         setting_engine::SettingEngine,
     },
-    data_channel::{RTCDataChannel, data_channel_init::RTCDataChannelInit, data_channel_message::DataChannelMessage},
+    data_channel::{
+        RTCDataChannel, data_channel_init::RTCDataChannelInit,
+        data_channel_message::DataChannelMessage,
+    },
     ice::udp_network::{EphemeralUDP, UDPNetwork},
     ice_transport::{
         ice_candidate::{RTCIceCandidate, RTCIceCandidateInit},
@@ -47,11 +50,6 @@ use webrtc::{
         configuration::RTCConfiguration,
         peer_connection_state::RTCPeerConnectionState,
         sdp::{sdp_type::RTCSdpType, session_description::RTCSessionDescription},
-    },
-    rtp_transceiver::{
-        RTCRtpTransceiverInit,
-        rtp_codec::RTPCodecType,
-        rtp_transceiver_direction::RTCRtpTransceiverDirection,
     },
 };
 
@@ -128,9 +126,9 @@ pub async fn new(
     // keepalive_interval: How often to send STUN binding requests to keep NAT mappings alive
     // failed_timeout: (Note: this is set via disconnected_timeout in the API)
     api_settings.set_ice_timeouts(
-        Some(std::time::Duration::from_secs(60)),  // disconnected_timeout - 60s to allow recovery
+        Some(std::time::Duration::from_secs(60)), // disconnected_timeout - 60s to allow recovery
         Some(std::time::Duration::from_millis(500)), // keepalive_interval - more aggressive keepalives
-        Some(std::time::Duration::from_secs(120)), // failed_timeout - 2 minutes before giving up
+        Some(std::time::Duration::from_secs(120)),   // failed_timeout - 2 minutes before giving up
     );
     info!("[WebRTC]: ICE timeouts configured - disconnected: 60s, keepalive: 500ms, failed: 120s");
 
@@ -141,10 +139,15 @@ pub async fn new(
         let midpoint = min + (range_size / 2);
         let primary_min = min;
         let primary_max = midpoint;
-        
-        info!("[WebRTC]: Port range isolation - primary peer using ports {}-{} (input peer will use {}-{})", 
-              primary_min, primary_max, midpoint + 1, max);
-        
+
+        info!(
+            "[WebRTC]: Port range isolation - primary peer using ports {}-{} (input peer will use {}-{})",
+            primary_min,
+            primary_max,
+            midpoint + 1,
+            max
+        );
+
         match EphemeralUDP::new(primary_min, primary_max) {
             Ok(udp) => {
                 api_settings.set_udp_network(UDPNetwork::Ephemeral(udp));
@@ -196,44 +199,11 @@ pub async fn new(
     // Clone config for potential input peer creation later
     let rtc_config_clone = rtc_config.clone();
     let webrtc_config_clone = config.clone();
-    
+
     let peer = Arc::new(api.new_peer_connection(rtc_config).await?);
-
-    let reserve_sender = |kind: RTPCodecType, label: &str| {
-        let peer = peer.clone();
-        async move {
-            match peer
-                .add_transceiver_from_kind(
-                    kind,
-                    Some(RTCRtpTransceiverInit {
-                        direction: RTCRtpTransceiverDirection::Sendonly,
-                        send_encodings: vec![],
-                    }),
-                )
-                .await
-            {
-                Ok(transceiver) => {
-                    info!("[WebRTC]: Reserved primary {label} sender before initial negotiation");
-                    Some(transceiver.sender().await)
-                }
-                Err(err) => {
-                    warn!(
-                        "[WebRTC]: Failed to reserve primary {label} sender before initial negotiation: {err:?}"
-                    );
-                    None
-                }
-            }
-        }
-    };
-
-    // Keep video on the legacy add-track path until the actual Sunshine codec is known.
-    let video_sender = None;
-    let audio_sender = reserve_sender(RTPCodecType::Audio, "audio").await;
 
     let general_channel = peer.create_data_channel("general", None).await?;
 
-    // Send WebRTC Info only after any pre-negotiated primary media senders are reserved
-    // so the browser's initial offer can include matching recvonly media sections.
     if let Err(err) = event_sender
         .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
             StreamServerMessage::Setup {
@@ -258,14 +228,14 @@ pub async fn new(
         video: Mutex::new(WebRtcVideo::new(
             runtime.clone(),
             Arc::downgrade(&peer),
-            video_sender,
+            None,
             stream_settings.video_supported_formats,
             stream_settings.video_frame_queue_size as usize,
         )),
         audio: Mutex::new(WebRtcAudio::new(
             runtime,
             Arc::downgrade(&peer),
-            audio_sender,
+            None,
             stream_settings.audio_sample_queue_size as usize,
         )),
         timeout_terminate_request: Mutex::new(None),
@@ -314,7 +284,7 @@ pub async fn new(
     ));
 
     // Note: Keepalive channel is created by client and handled in on_data_channel
-    
+
     drop(peer);
 
     Ok((
@@ -387,7 +357,7 @@ impl WebRtcInner {
     async fn on_ice_connection_state_change(self: &Arc<Self>, state: RTCIceConnectionState) {
         // Log ICE connection state changes with detailed info
         info!("[ICE]: Connection state changed: {:?}", state);
-        
+
         match state {
             RTCIceConnectionState::New => {
                 info!("[ICE]: New - ICE agent is gathering candidates");
@@ -403,11 +373,15 @@ impl WebRtcInner {
             }
             RTCIceConnectionState::Disconnected => {
                 warn!("[ICE]: Disconnected - STUN keepalives not being acknowledged by peer!");
-                warn!("[ICE]: This usually means the client stopped responding to STUN binding requests");
+                warn!(
+                    "[ICE]: This usually means the client stopped responding to STUN binding requests"
+                );
                 warn!("[ICE]: Server will continue trying for 60s before declaring failure");
             }
             RTCIceConnectionState::Failed => {
-                error!("[ICE]: Failed - All candidate pairs have failed. Connection unrecoverable.");
+                error!(
+                    "[ICE]: Failed - All candidate pairs have failed. Connection unrecoverable."
+                );
             }
             RTCIceConnectionState::Closed => {
                 info!("[ICE]: Closed - ICE agent has been closed");
@@ -417,21 +391,21 @@ impl WebRtcInner {
             }
         }
     }
-    
+
     async fn on_peer_connection_state_change(self: Arc<Self>, state: RTCPeerConnectionState) {
         info!("[WebRTC] Peer connection state changed: {:?}", state);
-        
+
         #[allow(clippy::collapsible_if)]
         if matches!(state, RTCPeerConnectionState::Connected) {
             info!("[WebRTC] Connection established - clearing any pending termination");
             self.clear_terminate_request().await;
-            
+
             // Mark primary peer as connected
             {
                 let mut connected = self.primary_peer_connected.lock().await;
                 *connected = true;
             }
-            
+
             // Check if input peer creation was pending (hybrid mode sequencing)
             let should_create_input_peer = {
                 let mut pending = self.input_peer_pending.lock().await;
@@ -442,12 +416,14 @@ impl WebRtcInner {
                     false
                 }
             };
-            
+
             if should_create_input_peer {
-                info!("[WebRTC] Primary peer connected - now creating pending input peer (connection sequencing)");
+                info!(
+                    "[WebRTC] Primary peer connected - now creating pending input peer (connection sequencing)"
+                );
                 self.clone().create_input_peer().await;
             }
-            
+
             if let Err(err) = self
                 .event_sender
                 .send(TransportEvent::StartStream {
@@ -474,7 +450,10 @@ impl WebRtcInner {
             // Do NOT call request_terminate() here - let ICE try to recover
         } else {
             // For other states (New, Connecting), clear any pending termination
-            info!("[WebRTC] Connection state: {:?} - clearing termination request", state);
+            info!(
+                "[WebRTC] Connection state: {:?} - clearing termination request",
+                state
+            );
             self.clear_terminate_request().await;
         }
     }
@@ -522,7 +501,7 @@ impl WebRtcInner {
     }
     /// Request to send an offer, with batching to prevent duplicate offers
     /// when multiple tracks are added in quick succession.
-    /// 
+    ///
     /// This uses a deadline-based batching approach:
     /// - First call sets a deadline 300ms in the future
     /// - Subsequent calls extend the deadline by 100ms (up to max 500ms from first call)
@@ -532,23 +511,28 @@ impl WebRtcInner {
         const INITIAL_BATCH_DELAY_MS: u64 = 300; // Initial delay to wait for more tracks
         const EXTENSION_MS: u64 = 100; // Extend deadline by this much for each new request
         const MAX_TOTAL_DELAY_MS: u64 = 500; // Maximum total delay from first request
-        
+
         let now = Instant::now();
-        
+
         let should_start_task: bool;
         {
             let mut deadline = self.offer_batch_deadline.lock().await;
             let mut task_running = self.offer_batch_task_running.lock().await;
-            
+
             if let Some(current_deadline) = *deadline {
                 // Already have a pending batch - extend the deadline if possible
-                let time_since_first = now.duration_since(current_deadline - Duration::from_millis(INITIAL_BATCH_DELAY_MS));
+                let time_since_first = now.duration_since(
+                    current_deadline - Duration::from_millis(INITIAL_BATCH_DELAY_MS),
+                );
                 if time_since_first < Duration::from_millis(MAX_TOTAL_DELAY_MS - EXTENSION_MS) {
                     let new_deadline = now + Duration::from_millis(EXTENSION_MS);
                     if new_deadline > current_deadline {
                         *deadline = Some(new_deadline);
-                        info!("[Signaling]: Extended offer batch deadline by {}ms (now {:?} from now)", 
-                            EXTENSION_MS, new_deadline.duration_since(now));
+                        info!(
+                            "[Signaling]: Extended offer batch deadline by {}ms (now {:?} from now)",
+                            EXTENSION_MS,
+                            new_deadline.duration_since(now)
+                        );
                     }
                 } else {
                     info!("[Signaling]: Offer batch at max delay, not extending further");
@@ -562,17 +546,20 @@ impl WebRtcInner {
                 if should_start_task {
                     *task_running = true;
                 }
-                info!("[Signaling]: Starting new offer batch, will send in {}ms", INITIAL_BATCH_DELAY_MS);
+                info!(
+                    "[Signaling]: Starting new offer batch, will send in {}ms",
+                    INITIAL_BATCH_DELAY_MS
+                );
             }
         }
-        
+
         if should_start_task {
             // Start the batch task
             let peer = self.peer.clone();
             let event_sender = self.event_sender.clone();
             let offer_batch_deadline = self.offer_batch_deadline.clone();
             let offer_batch_task_running = self.offer_batch_task_running.clone();
-            
+
             tokio::spawn(async move {
                 loop {
                     // Check deadline and sleep until it's reached
@@ -595,11 +582,11 @@ impl WebRtcInner {
                             }
                         }
                     };
-                    
+
                     if sleep_duration > Duration::ZERO {
                         sleep(sleep_duration).await;
                     }
-                    
+
                     // Check if deadline was extended while we were sleeping
                     let should_send = {
                         let deadline = offer_batch_deadline.lock().await;
@@ -608,20 +595,20 @@ impl WebRtcInner {
                             None => false,
                         }
                     };
-                    
+
                     if should_send {
                         break;
                     }
                 }
-                
+
                 // Clear the deadline and send the offer
                 {
                     let mut deadline = offer_batch_deadline.lock().await;
                     *deadline = None;
                 }
-                
+
                 info!("[Signaling]: Batch deadline reached, sending offer now");
-                
+
                 // Send offer
                 let local_description = match peer.create_offer(None).await {
                     Err(err) => {
@@ -634,13 +621,18 @@ impl WebRtcInner {
                 };
 
                 if let Err(err) = peer.set_local_description(local_description.clone()).await {
-                    warn!("[Signaling]: failed to set local description for batched offer: {err:?}");
+                    warn!(
+                        "[Signaling]: failed to set local description for batched offer: {err:?}"
+                    );
                     let mut task_running = offer_batch_task_running.lock().await;
                     *task_running = false;
                     return;
                 }
 
-                info!("[Signaling]: Batched offer created and set (SDP length: {} bytes)", local_description.sdp.len());
+                info!(
+                    "[Signaling]: Batched offer created and set (SDP length: {} bytes)",
+                    local_description.sdp.len()
+                );
 
                 if let Err(err) = event_sender
                     .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
@@ -655,15 +647,15 @@ impl WebRtcInner {
                 {
                     warn!("Failed to send batched offer via web socket: {err:?}");
                 }
-                
+
                 let mut task_running = offer_batch_task_running.lock().await;
                 *task_running = false;
             });
         }
-        
+
         true
     }
-    
+
     /// Actually send the offer (internal implementation)
     async fn send_offer_immediate(&self) -> bool {
         let local_description = match self.peer.create_offer(None).await {
@@ -863,10 +855,10 @@ impl WebRtcInner {
             "keepalive" => {
                 // Handle client-created keepalive channel
                 info!("[Keepalive]: Received keepalive channel from client");
-                
+
                 let inner_weak = inner.clone();
                 let channel_clone = channel.clone();
-                
+
                 // Set up message handler for client pings
                 channel.on_message(Box::new(move |msg: DataChannelMessage| {
                     let inner = inner_weak.clone();
@@ -878,7 +870,7 @@ impl WebRtcInner {
                         inner.handle_client_keepalive(channel, msg).await;
                     })
                 }));
-                
+
                 // Start sending pings on this channel
                 let inner_weak = Arc::downgrade(&self);
                 let channel_for_ping = channel.clone();
@@ -886,75 +878,91 @@ impl WebRtcInner {
                 spawn(async move {
                     // Wait for channel to be ready
                     sleep(Duration::from_secs(1)).await;
-                    
+
                     // Asymmetric connectivity detection threshold:
                     // If we've sent 3 pings (9 seconds) without receiving a pong,
                     // declare the connection dead. This catches cases where server->client
                     // path works but client->server path is broken.
                     const MAX_PINGS_WITHOUT_PONG: u32 = 3;
-                    
+
                     loop {
                         let Some(inner) = inner_weak.upgrade() else {
                             info!("[Keepalive]: Inner dropped, stopping client keepalive task");
                             break;
                         };
-                        
-                        if channel_for_ping.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
+
+                        if channel_for_ping.ready_state()
+                            == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+                        {
                             let timestamp = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_millis();
                             let ping_msg = format!(r#"{{"type":"ping","ts":{}}}"#, timestamp);
-                            
+
                             // Increment pings without pong counter BEFORE sending
                             let pings_without_pong = {
                                 let mut counter = inner.keepalive_pings_without_pong.lock().await;
                                 *counter += 1;
                                 *counter
                             };
-                            
+
                             if let Err(err) = channel_for_ping.send_text(ping_msg).await {
                                 warn!("[Keepalive]: Failed to send ping to client: {err:?}");
                             } else {
-                                debug!("[Keepalive]: Sent ping #{} to client at {}", pings_without_pong, timestamp);
+                                debug!(
+                                    "[Keepalive]: Sent ping #{} to client at {}",
+                                    pings_without_pong, timestamp
+                                );
                             }
-                            
+
                             // Check for asymmetric connectivity (server can send, client can't respond)
                             if pings_without_pong >= MAX_PINGS_WITHOUT_PONG {
                                 let last_response = inner.last_keepalive_response.lock().await;
                                 let elapsed = last_response.elapsed();
                                 drop(last_response);
-                                
+
                                 warn!("[Keepalive]: ASYMMETRIC CONNECTIVITY DETECTED!");
-                                warn!("[Keepalive]: Sent {} pings without receiving any pong response", pings_without_pong);
-                                warn!("[Keepalive]: Last pong was {:?} ago - client->server path appears broken", elapsed);
-                                warn!("[Keepalive]: Requesting termination due to one-way connectivity loss");
-                                
+                                warn!(
+                                    "[Keepalive]: Sent {} pings without receiving any pong response",
+                                    pings_without_pong
+                                );
+                                warn!(
+                                    "[Keepalive]: Last pong was {:?} ago - client->server path appears broken",
+                                    elapsed
+                                );
+                                warn!(
+                                    "[Keepalive]: Requesting termination due to one-way connectivity loss"
+                                );
+
                                 // Request termination - the connection is effectively dead
                                 // even though ICE might still think it's connected
                                 inner.request_terminate().await;
-                                
+
                                 // Also send a close event to the server
-                                let _ = event_sender
-                                    .send(TransportEvent::Closed)
-                                    .await;
-                                
+                                let _ = event_sender.send(TransportEvent::Closed).await;
+
                                 break;
                             }
-                            
+
                             // Also log standard timeout warning
                             let last_response = inner.last_keepalive_response.lock().await;
                             let elapsed = last_response.elapsed();
                             drop(last_response);
-                            
+
                             if elapsed > Duration::from_secs(10) {
-                                warn!("[Keepalive]: No client keepalive response for {:?} - connection may be dead (pings without pong: {})", 
-                                    elapsed, pings_without_pong);
+                                warn!(
+                                    "[Keepalive]: No client keepalive response for {:?} - connection may be dead (pings without pong: {})",
+                                    elapsed, pings_without_pong
+                                );
                             }
                         } else {
-                            debug!("[Keepalive]: Channel not open yet, state: {:?}", channel_for_ping.ready_state());
+                            debug!(
+                                "[Keepalive]: Channel not open yet, state: {:?}",
+                                channel_for_ping.ready_state()
+                            );
                         }
-                        
+
                         sleep(Duration::from_secs(3)).await;
                     }
                 });
@@ -964,7 +972,7 @@ impl WebRtcInner {
             }
         };
     }
-    
+
     async fn handle_client_keepalive(&self, channel: Arc<RTCDataChannel>, msg: DataChannelMessage) {
         let data = match std::str::from_utf8(&msg.data) {
             Ok(s) => s,
@@ -973,7 +981,7 @@ impl WebRtcInner {
                 return;
             }
         };
-        
+
         if data.contains(r#""type":"ping""#) {
             // Respond with pong
             let timestamp = std::time::SystemTime::now()
@@ -981,7 +989,7 @@ impl WebRtcInner {
                 .unwrap_or_default()
                 .as_millis();
             let pong_msg = format!(r#"{{"type":"pong","ts":{}}}"#, timestamp);
-            
+
             if let Err(err) = channel.send_text(pong_msg).await {
                 warn!("[Keepalive]: Failed to send pong to client: {err:?}");
             } else {
@@ -995,16 +1003,21 @@ impl WebRtcInner {
                 *counter = 0;
                 prev
             };
-            
+
             let mut last_response = self.last_keepalive_response.lock().await;
             let elapsed = last_response.elapsed();
             *last_response = Instant::now();
-            
+
             if prev_count > 1 {
-                info!("[Keepalive]: Received client pong after {} missed pings (round-trip: {:?}) - connectivity restored", 
-                    prev_count, elapsed);
+                info!(
+                    "[Keepalive]: Received client pong after {} missed pings (round-trip: {:?}) - connectivity restored",
+                    prev_count, elapsed
+                );
             } else {
-                debug!("[Keepalive]: Received client pong (round-trip: {:?})", elapsed);
+                debug!(
+                    "[Keepalive]: Received client pong (round-trip: {:?})",
+                    elapsed
+                );
             }
         }
     }
@@ -1022,38 +1035,47 @@ impl WebRtcInner {
         // Create a new peer connection for input only (no media)
         // IMPORTANT: Configure with proper settings to match primary peer AND use isolated port range
         let mut api_settings = SettingEngine::default();
-        
+
         // Configure ICE timeouts - MUST match primary peer for consistent behavior
         api_settings.set_ice_timeouts(
-            Some(std::time::Duration::from_secs(60)),   // disconnected_timeout - 60s to allow recovery
+            Some(std::time::Duration::from_secs(60)), // disconnected_timeout - 60s to allow recovery
             Some(std::time::Duration::from_millis(500)), // keepalive_interval - more aggressive keepalives
-            Some(std::time::Duration::from_secs(120)),  // failed_timeout - 2 minutes before giving up
+            Some(std::time::Duration::from_secs(120)), // failed_timeout - 2 minutes before giving up
         );
-        info!("[InputPeer]: ICE timeouts configured - disconnected: 60s, keepalive: 500ms, failed: 120s");
+        info!(
+            "[InputPeer]: ICE timeouts configured - disconnected: 60s, keepalive: 500ms, failed: 120s"
+        );
 
         // Port range isolation: Use the UPPER HALF of the configured port range for input peer
         // Primary peer uses lower half, input peer uses upper half - prevents port conflicts
         if let Some(PortRange { min, max }) = self.webrtc_config.port_range.as_ref() {
             let range_size = max - min;
             let midpoint = min + (range_size / 2);
-            let input_min = midpoint + 1;  // Input peer uses upper half
+            let input_min = midpoint + 1; // Input peer uses upper half
             let input_max = *max;
-            
-            info!("[InputPeer]: Port range isolation - using ports {}-{} (primary uses {}-{})", 
-                  input_min, input_max, min, midpoint);
-            
+
+            info!(
+                "[InputPeer]: Port range isolation - using ports {}-{} (primary uses {}-{})",
+                input_min, input_max, min, midpoint
+            );
+
             match EphemeralUDP::new(input_min, input_max) {
                 Ok(udp) => {
                     api_settings.set_udp_network(UDPNetwork::Ephemeral(udp));
                 }
                 Err(err) => {
-                    warn!("[InputPeer]: Failed to configure port range {}-{}: {err:?}", input_min, input_max);
+                    warn!(
+                        "[InputPeer]: Failed to configure port range {}-{}: {err:?}",
+                        input_min, input_max
+                    );
                 }
             }
         } else {
             // No port range configured - use default ephemeral ports
             // This is less ideal but will work; log a warning
-            warn!("[InputPeer]: No port range configured - using default ephemeral ports (may cause conflicts)");
+            warn!(
+                "[InputPeer]: No port range configured - using default ephemeral ports (may cause conflicts)"
+            );
         }
 
         // Network types - match primary peer configuration
@@ -1065,10 +1087,10 @@ impl WebRtcInner {
                 .map(into_webrtc_network_type)
                 .collect(),
         );
-        
+
         // Loopback candidates - match primary peer configuration
         api_settings.set_include_loopback_candidate(self.webrtc_config.include_loopback_candidates);
-        
+
         // NAT 1:1 mapping - match primary peer configuration
         if let Some(mapping) = self.webrtc_config.nat_1to1.as_ref() {
             api_settings.set_nat_1to1_ips(
@@ -1078,9 +1100,7 @@ impl WebRtcInner {
         }
 
         // Build API with configured settings (no media engine needed for data-only peer)
-        let api = APIBuilder::new()
-            .with_setting_engine(api_settings)
-            .build();
+        let api = APIBuilder::new().with_setting_engine(api_settings).build();
 
         let input_peer = match api.new_peer_connection(self.rtc_config.clone()).await {
             Ok(peer) => Arc::new(peer),
@@ -1089,8 +1109,10 @@ impl WebRtcInner {
                 return;
             }
         };
-        
-        info!("[InputPeer]: Input peer connection created successfully with isolated configuration");
+
+        info!(
+            "[InputPeer]: Input peer connection created successfully with isolated configuration"
+        );
 
         let inner = Arc::downgrade(self);
 
@@ -1140,13 +1162,13 @@ impl WebRtcInner {
         // Data channels MUST be created before the SDP offer so they are included in the offer
         // Since the server creates the channels, we must attach message handlers directly
         // (on_data_channel callback only fires for remotely-created channels)
-        
+
         // Create ordered data channels for reliable input
         let ordered_config = RTCDataChannelInit {
             ordered: Some(true),
             ..Default::default()
         };
-        
+
         // Create unordered data channels for low-latency input
         let unordered_config = RTCDataChannelInit {
             ordered: Some(false),
@@ -1165,7 +1187,10 @@ impl WebRtcInner {
             match peer.create_data_channel(name, Some(config)).await {
                 Ok(channel) => {
                     channel.on_message(create_channel_message_handler(inner.clone(), channel_type));
-                    info!("[InputPeer]: Created and attached handler for channel: {}", name);
+                    info!(
+                        "[InputPeer]: Created and attached handler for channel: {}",
+                        name
+                    );
                     Some(channel)
                 }
                 Err(err) => {
@@ -1177,47 +1202,78 @@ impl WebRtcInner {
 
         // Mouse channels
         create_input_channel(
-            &input_peer, "mouse_reliable", ordered_config.clone(), &inner,
-            TransportChannel(TransportChannelId::MOUSE_RELIABLE)
-        ).await;
+            &input_peer,
+            "mouse_reliable",
+            ordered_config.clone(),
+            &inner,
+            TransportChannel(TransportChannelId::MOUSE_RELIABLE),
+        )
+        .await;
         create_input_channel(
-            &input_peer, "mouse_absolute", unordered_config.clone(), &inner,
-            TransportChannel(TransportChannelId::MOUSE_ABSOLUTE)
-        ).await;
+            &input_peer,
+            "mouse_absolute",
+            unordered_config.clone(),
+            &inner,
+            TransportChannel(TransportChannelId::MOUSE_ABSOLUTE),
+        )
+        .await;
         create_input_channel(
-            &input_peer, "mouse_relative", unordered_config.clone(), &inner,
-            TransportChannel(TransportChannelId::MOUSE_RELATIVE)
-        ).await;
+            &input_peer,
+            "mouse_relative",
+            unordered_config.clone(),
+            &inner,
+            TransportChannel(TransportChannelId::MOUSE_RELATIVE),
+        )
+        .await;
 
         // Keyboard channel (ordered for key sequence integrity)
         create_input_channel(
-            &input_peer, "keyboard", ordered_config.clone(), &inner,
-            TransportChannel(TransportChannelId::KEYBOARD)
-        ).await;
+            &input_peer,
+            "keyboard",
+            ordered_config.clone(),
+            &inner,
+            TransportChannel(TransportChannelId::KEYBOARD),
+        )
+        .await;
 
         // Touch channel (ordered)
         create_input_channel(
-            &input_peer, "touch", ordered_config.clone(), &inner,
-            TransportChannel(TransportChannelId::TOUCH)
-        ).await;
+            &input_peer,
+            "touch",
+            ordered_config.clone(),
+            &inner,
+            TransportChannel(TransportChannelId::TOUCH),
+        )
+        .await;
 
         // Controllers channel (unordered for low latency)
         create_input_channel(
-            &input_peer, "controllers", unordered_config.clone(), &inner,
-            TransportChannel(TransportChannelId::CONTROLLERS)
-        ).await;
+            &input_peer,
+            "controllers",
+            unordered_config.clone(),
+            &inner,
+            TransportChannel(TransportChannelId::CONTROLLERS),
+        )
+        .await;
 
         // Individual controller channels (controller0 through controller15)
         for i in 0..16 {
             let channel_name = format!("controller{}", i);
             create_input_channel(
-                &input_peer, &channel_name, unordered_config.clone(), &inner,
-                TransportChannel(InboundPacket::CONTROLLER_CHANNELS[i])
-            ).await;
+                &input_peer,
+                &channel_name,
+                unordered_config.clone(),
+                &inner,
+                TransportChannel(InboundPacket::CONTROLLER_CHANNELS[i]),
+            )
+            .await;
         }
 
         // Stats channel for latency info (ordered) - store reference for sending stats
-        if let Ok(stats_channel) = input_peer.create_data_channel("stats", Some(ordered_config.clone())).await {
+        if let Ok(stats_channel) = input_peer
+            .create_data_channel("stats", Some(ordered_config.clone()))
+            .await
+        {
             stats_channel.on_close({
                 let this = inner.clone();
                 Box::new(move || {
@@ -1256,9 +1312,12 @@ impl WebRtcInner {
                     return;
                 }
 
-                info!("[InputPeer]: Sending offer to input client (SDP includes {} bytes)", offer.sdp.len());
+                info!(
+                    "[InputPeer]: Sending offer to input client (SDP includes {} bytes)",
+                    offer.sdp.len()
+                );
                 debug!("[InputPeer]: SDP offer:\n{}", offer.sdp);
-                
+
                 if let Err(err) = self
                     .event_sender
                     .send(TransportEvent::SendIpc(StreamerIpcMessage::InputSignaling(
@@ -1440,7 +1499,9 @@ impl WebRtcInner {
             }
         } else if matches!(
             state,
-            RTCPeerConnectionState::Failed | RTCPeerConnectionState::Disconnected | RTCPeerConnectionState::Closed
+            RTCPeerConnectionState::Failed
+                | RTCPeerConnectionState::Disconnected
+                | RTCPeerConnectionState::Closed
         ) {
             info!("[InputPeer]: Input peer disconnected");
             // Clean up input peer
@@ -1455,7 +1516,7 @@ impl WebRtcInner {
             let mut input_stats = self.input_stats_channel.lock().await;
             *input_stats = None;
         }
-        
+
         // Close and clean up input peer
         let mut input_peer_guard = self.input_peer.lock().await;
         if let Some(ref input_peer) = *input_peer_guard {
@@ -1613,12 +1674,16 @@ impl TransportSender for WebRTCTransportSender {
                 // Connection sequencing: Only create input peer after primary peer is connected
                 // This prevents ICE agent conflicts during simultaneous peer setup
                 let primary_connected = *self.inner.primary_peer_connected.lock().await;
-                
+
                 if primary_connected {
-                    info!("[WebRTC]: Input connection joined - primary peer already connected, creating input peer immediately");
+                    info!(
+                        "[WebRTC]: Input connection joined - primary peer already connected, creating input peer immediately"
+                    );
                     self.inner.clone().create_input_peer().await;
                 } else {
-                    info!("[WebRTC]: Input connection joined - primary peer not yet connected, deferring input peer creation (connection sequencing)");
+                    info!(
+                        "[WebRTC]: Input connection joined - primary peer not yet connected, deferring input peer creation (connection sequencing)"
+                    );
                     let mut pending = self.inner.input_peer_pending.lock().await;
                     *pending = true;
                 }

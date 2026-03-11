@@ -34,8 +34,8 @@ use webrtc::{
     },
     rtp_transceiver::{
         RTCPFeedback,
-        rtp_sender::RTCRtpSender,
         rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType},
+        rtp_sender::RTCRtpSender,
     },
     track::track_local::track_local_static_rtp::TrackLocalStaticRTP,
 };
@@ -162,6 +162,8 @@ impl WebRtcVideo {
                 return false;
             }
         };
+
+        info!("[WebRTC-Video]: Track attached via {:?}", attach_mode);
 
         self.clock_rate = codec.capability.clock_rate;
 

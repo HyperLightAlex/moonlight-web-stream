@@ -259,30 +259,9 @@ export class Stream implements Component {
 
             this.stats.setVideoInfo(format ?? "Unknown", width, height, fps)
 
-            await Promise.all([
-                this.setupVideo({
-                    format,
-                    fps,
-                    width,
-                    height,
-                }),
-                // TODO: more audio info?
-                this.setupAudio()
-            ])
-
-            this.debugLog(`Using video pipeline: ${this.transport?.getChannel(TransportChannelId.HOST_VIDEO).type} (transport) -> ${this.videoRenderer?.implementationName} (renderer)`)
-            this.debugLog(`Using audio pipeline: ${this.transport?.getChannel(TransportChannelId.HOST_AUDIO).type} (transport) -> ${this.audioPlayer?.implementationName} (player)`)
-
-            // In hybrid mode, auto-start video and audio since input is handled by native client
-            // and we won't receive user interaction events in the WebView
-            if (this.hybridMode) {
-                this.debugLog("Hybrid mode: auto-starting video and audio playback")
-                // Trigger the same actions as onUserInteraction() to unmute audio and ensure video plays
-                this.videoRenderer?.onUserInteraction()
-                this.audioPlayer?.onUserInteraction()
-            }
-
-            // Notify AndroidBridge if available (for hybrid mode)
+            // Notify the native client as soon as the server reports the stream is ready.
+            // Media pipeline setup continues below, but the Android loading state should
+            // not block on renderer/player initialization.
             ;(window as any).streamConnected = true
             ;(window as any).streamWidth = width
             ;(window as any).streamHeight = height
@@ -297,6 +276,44 @@ export class Stream implements Component {
             window.dispatchEvent(new CustomEvent('streamConnected', {
                 detail: { width, height, fps, codec: format }
             }))
+
+            try {
+                await Promise.all([
+                    this.setupVideo({
+                        format,
+                        fps,
+                        width,
+                        height,
+                    }),
+                    // TODO: more audio info?
+                    this.setupAudio()
+                ])
+            } catch (err) {
+                const errorMessage = err instanceof Error ? err.message : String(err)
+                console.error("[Stream]: Failed to initialize media pipeline", err)
+                this.debugLog(`Failed to initialize media pipeline: ${errorMessage}`, "fatal")
+
+                if ((window as any).AndroidBridge?.onStreamError) {
+                    (window as any).AndroidBridge.onStreamError(`Failed to initialize media pipeline: ${errorMessage}`)
+                }
+                window.dispatchEvent(new CustomEvent('streamError', {
+                    detail: { message: `Failed to initialize media pipeline: ${errorMessage}` }
+                }))
+                return
+            }
+
+            this.debugLog(`Using video pipeline: ${this.transport?.getChannel(TransportChannelId.HOST_VIDEO).type} (transport) -> ${this.videoRenderer?.implementationName} (renderer)`)
+            this.debugLog(`Using audio pipeline: ${this.transport?.getChannel(TransportChannelId.HOST_AUDIO).type} (transport) -> ${this.audioPlayer?.implementationName} (player)`)
+
+            // In hybrid mode, auto-start video and audio since input is handled by native client
+            // and we won't receive user interaction events in the WebView
+            if (this.hybridMode) {
+                this.debugLog("Hybrid mode: auto-starting video and audio playback")
+                // Trigger the same actions as onUserInteraction() to unmute audio and ensure video plays
+                this.videoRenderer?.onUserInteraction()
+                this.audioPlayer?.onUserInteraction()
+            }
+
         }
         // -- WebRTC Config
         else if ("Setup" in message) {

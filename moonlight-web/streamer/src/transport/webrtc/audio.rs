@@ -1,22 +1,22 @@
-use std::{sync::{Arc, Weak}, time::Duration};
+use std::{
+    sync::{Arc, Weak},
+    time::Duration,
+};
 
 use bytes::Bytes;
-use log::{error, warn};
+use log::{error, info, warn};
 use moonlight_common::stream::bindings::{AudioConfig, OpusMultistreamConfig};
 use tokio::runtime::Handle;
 use webrtc::{
     api::media_engine::{MIME_TYPE_OPUS, MediaEngine},
     media::Sample,
     peer_connection::RTCPeerConnection,
-    rtp_transceiver::rtp_sender::RTCRtpSender,
     rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType},
+    rtp_transceiver::rtp_sender::RTCRtpSender,
     track::track_local::track_local_static_sample::TrackLocalStaticSample,
 };
 
-use crate::transport::webrtc::{
-    WebRtcInner,
-    sender::TrackLocalSender,
-};
+use crate::transport::webrtc::{WebRtcInner, sender::TrackLocalSender};
 
 pub fn register_audio_codecs(media_engine: &mut MediaEngine) -> Result<(), webrtc::Error> {
     media_engine.register_codec(
@@ -63,6 +63,11 @@ impl WebRtcAudio {
         audio_config: AudioConfig,
         stream_config: OpusMultistreamConfig,
     ) -> i32 {
+        info!(
+            "[WebRTC-Audio]: Setting up audio track with sample_rate={} samples_per_frame={}",
+            stream_config.sample_rate, stream_config.samples_per_frame
+        );
+
         const SUPPORTED_SAMPLE_RATES: &[u32] = &[80000, 12000, 16000, 24000, 48000];
         if !SUPPORTED_SAMPLE_RATES.contains(&stream_config.sample_rate) {
             warn!(
@@ -100,6 +105,8 @@ impl WebRtcAudio {
         };
 
         self.config = Some(stream_config);
+
+        info!("[WebRTC-Audio]: Track attached via {:?}", attach_mode);
 
         if attach_mode.requires_renegotiation() && !inner.send_offer().await {
             warn!("Failed to renegotiate after audio track creation");

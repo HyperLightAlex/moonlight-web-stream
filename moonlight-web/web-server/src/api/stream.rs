@@ -154,16 +154,17 @@ pub async fn start_host(
         // When embedded in Fuji, we also lookup the Fuji game ID from our cached mapping
         let app: App;
         let mut fuji_game_id_early: Option<String> = None;
-        
+
         {
             use crate::app::fuji_internal::is_embedded_in_fuji;
-            
+
             // Get Sunshine apps
             let apps = match host.list_apps(&mut user).await {
                 Ok(apps) => apps,
                 Err(err) => {
                     warn!("failed to start stream for host {host_id:?} (at list_apps): {err:?}");
-                    let _ = send_ws_message(&mut session, StreamServerMessage::InternalServerError).await;
+                    let _ = send_ws_message(&mut session, StreamServerMessage::InternalServerError)
+                        .await;
                     let _ = session.close(None).await;
                     return;
                 }
@@ -171,7 +172,9 @@ pub async fn start_host(
 
             // Find the app by its real Sunshine ID
             let Some(found_app) = apps.into_iter().find(|a| a.id == app_id) else {
-                warn!("failed to start stream for host {host_id:?} because the app couldn't be found!");
+                warn!(
+                    "failed to start stream for host {host_id:?} because the app couldn't be found!"
+                );
                 let _ = send_ws_message(&mut session, StreamServerMessage::AppNotFound).await;
                 let _ = session.close(None).await;
                 return;
@@ -181,10 +184,16 @@ pub async fn start_host(
             // When embedded in Fuji, get the Fuji game ID from our cached mapping
             if is_embedded_in_fuji().await {
                 if let Some(fuji_id) = web_app.get_fuji_game_id(app_id.0).await {
-                    info!("[Stream]: Found cached Fuji mapping for Sunshine ID {}: {}", app_id.0, fuji_id);
+                    info!(
+                        "[Stream]: Found cached Fuji mapping for Sunshine ID {}: {}",
+                        app_id.0, fuji_id
+                    );
                     fuji_game_id_early = Some(fuji_id);
                 } else {
-                    info!("[Stream]: No Fuji mapping for Sunshine ID {}, app title: '{}'", app_id.0, app.title);
+                    info!(
+                        "[Stream]: No Fuji mapping for Sunshine ID {}, app title: '{}'",
+                        app_id.0, app.title
+                    );
                 }
             }
         }
@@ -204,17 +213,23 @@ pub async fn start_host(
         // When embedded in Fuji, get fresh Sunshine port (it may have changed since pairing)
         {
             use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
-            
+
             if is_embedded_in_fuji().await {
                 match fuji_client().get_sunshine_ports().await {
                     Ok((fresh_http_port, _)) => {
                         if fresh_http_port != http_port {
-                            info!("[Stream]: Sunshine HTTP port changed {} -> {}", http_port, fresh_http_port);
+                            info!(
+                                "[Stream]: Sunshine HTTP port changed {} -> {}",
+                                http_port, fresh_http_port
+                            );
                         }
                         http_port = fresh_http_port;
                     }
                     Err(e) => {
-                        warn!("[Stream]: Failed to get fresh Sunshine ports: {:?}, using stored {}", e, http_port);
+                        warn!(
+                            "[Stream]: Failed to get fresh Sunshine ports: {:?}, using stored {}",
+                            e, http_port
+                        );
                     }
                 }
             }
@@ -239,12 +254,12 @@ pub async fn start_host(
         // -- Stream Orchestration via Fuji (when embedded)
         // Fuji handles all the decision-making:
         // 1. Check if a different game is running
-        // 2. Cancel the previous game if needed  
+        // 2. Cancel the previous game if needed
         // 3. Return "launch" or "resume" action
         // We pass BOTH the Sunshine app ID and Fuji game ID for tracking
         let mut launch_mode: Option<String> = None;
         let fuji_game_id: Option<String> = fuji_game_id_early; // Use ID found during app lookup
-        
+
         let embedded_in_fuji = {
             use crate::app::fuji_internal::is_embedded_in_fuji;
 
@@ -273,11 +288,7 @@ pub async fn start_host(
                 // Fuji uses Fuji game ID for its internal tracking
                 // But we use Sunshine's real app ID for streaming
                 let orchestration_result = fuji_client()
-                    .stream_launch_with_sunshine_id(
-                        fuji_game_id.as_deref(),
-                        app_id.0,
-                        &app_title,
-                    )
+                    .stream_launch_with_sunshine_id(fuji_game_id.as_deref(), app_id.0, &app_title)
                     .await;
 
                 match orchestration_result {
@@ -287,8 +298,7 @@ pub async fn start_host(
                                 launch_mode = Some(action.clone());
                                 info!(
                                     "[Stream]: Fuji orchestration decided: action={}, cancelledPrevious={:?}",
-                                    action,
-                                    response.cancelled_previous
+                                    action, response.cancelled_previous
                                 );
 
                                 if response.cancelled_previous.unwrap_or(false) {
@@ -306,7 +316,10 @@ pub async fn start_host(
                         }
                     }
                     Err(e) => {
-                        warn!("[Stream]: Fuji stream orchestration failed: {:?}, streamer will decide", e);
+                        warn!(
+                            "[Stream]: Fuji stream orchestration failed: {:?}, streamer will decide",
+                            e
+                        );
                     }
                 }
 
@@ -321,12 +334,14 @@ pub async fn start_host(
                 info!("[Stream]: NOT embedded in Fuji, streamer will decide launch mode");
             }
         }
-        
+
         // Use the REAL Sunshine app ID for streaming
         // No translation needed - client now sends real IDs from /api/apps
         let streamer_app_id = app_id.0;
-        info!("[Stream]: Using Sunshine app_id {} for streamer (title: '{}')", 
-              streamer_app_id, app_title);
+        info!(
+            "[Stream]: Using Sunshine app_id {} for streamer (title: '{}')",
+            streamer_app_id, app_title
+        );
 
         // -- Send App info
         let _ = send_ws_message(
@@ -348,7 +363,7 @@ pub async fn start_host(
         // This handles edge cases where previous streamers weren't properly killed
         {
             use crate::app::streamer_manager::streamer_manager;
-            
+
             info!("[Stream]: Cleaning up orphaned streamers before starting new session...");
             streamer_manager().cleanup_before_new_session().await;
         }
@@ -357,18 +372,17 @@ pub async fn start_host(
         // On Windows, use CREATE_NO_WINDOW to prevent console window from appearing
         #[cfg(windows)]
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        
+
         let mut cmd = Command::new(&web_app.config().streamer_path);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        
+
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
-        
-        let (mut child, stdin, stdout) = match cmd.spawn()
-        {
+
+        let (mut child, stdin, stdout) = match cmd.spawn() {
             Ok(mut child) => {
                 if let Some(stdin) = child.stdin.take()
                     && let Some(stdout) = child.stdout.take()
@@ -402,7 +416,9 @@ pub async fn start_host(
         let child_pid = child.id();
         {
             use crate::app::streamer_manager::streamer_manager;
-            streamer_manager().register(&child, hybrid_session_id.clone()).await;
+            streamer_manager()
+                .register(&child, hybrid_session_id.clone())
+                .await;
         }
 
         // Create ipc
@@ -424,23 +440,35 @@ pub async fn start_host(
         // Spawn task to forward input messages to streamer (if hybrid mode)
         if let Some(mut input_rx) = input_msg_rx {
             let hybrid_session_id_input = hybrid_session_id.clone();
-            info!("[Stream]: Starting input message forwarder for session {:?}", hybrid_session_id_input);
+            info!(
+                "[Stream]: Starting input message forwarder for session {:?}",
+                hybrid_session_id_input
+            );
             spawn(async move {
                 info!("[Stream]: Input message forwarder task started");
                 while let Some(msg) = input_rx.recv().await {
                     match msg {
                         InputToStreamerMessage::Joined => {
-                            info!("[Stream]: >>> Input connection joined, forwarding to streamer via IPC");
-                            ipc_sender_for_input.send(ServerIpcMessage::InputJoined).await;
+                            info!(
+                                "[Stream]: >>> Input connection joined, forwarding to streamer via IPC"
+                            );
+                            ipc_sender_for_input
+                                .send(ServerIpcMessage::InputJoined)
+                                .await;
                         }
                         InputToStreamerMessage::Signaling(signaling) => {
-                            info!("[Stream]: >>> Forwarding input signaling to streamer: {:?}", signaling);
+                            info!(
+                                "[Stream]: >>> Forwarding input signaling to streamer: {:?}",
+                                signaling
+                            );
                             ipc_sender_for_input
                                 .send(ServerIpcMessage::InputWebSocket(signaling))
                                 .await;
                         }
                         InputToStreamerMessage::Disconnected => {
-                            info!("[Stream]: >>> Input connection disconnected, notifying streamer");
+                            info!(
+                                "[Stream]: >>> Input connection disconnected, notifying streamer"
+                            );
                             ipc_sender_for_input
                                 .send(ServerIpcMessage::InputDisconnected)
                                 .await;
@@ -463,7 +491,8 @@ pub async fn start_host(
         let embedded_in_fuji_for_status = embedded_in_fuji;
 
         // Set up session event receiver for hybrid mode
-        let (session_event_tx, mut session_event_rx) = tokio::sync::mpsc::channel::<SessionEvent>(32);
+        let (session_event_tx, mut session_event_rx) =
+            tokio::sync::mpsc::channel::<SessionEvent>(32);
         if let Some(ref session_id) = hybrid_session_id_for_input {
             web_app_for_input
                 .session_manager()
@@ -481,43 +510,35 @@ pub async fn start_host(
                     ipc_msg = ipc_receiver.recv() => {
                         match ipc_msg {
                             Some(StreamerIpcMessage::WebSocket(message)) => {
+                                let mut fuji_started_notification: Option<Option<String>> = None;
+                                let mut fuji_failure_notification: Option<(Option<String>, String)> = None;
+
                                 if embedded_in_fuji_for_status {
                                     match &message {
                                         StreamServerMessage::ConnectionComplete { .. } if !fuji_stream_started_notified => {
-                                            if let Err(err) = crate::app::fuji_internal::fuji_client()
-                                                .stream_started(fuji_game_id_for_status.as_deref())
-                                                .await
-                                            {
-                                                warn!("[Stream]: Failed to notify Fuji that the stream started: {:?}", err);
-                                            } else {
-                                                fuji_stream_started_notified = true;
-                                            }
+                                            fuji_stream_started_notified = true;
+                                            fuji_started_notification = Some(fuji_game_id_for_status.clone());
                                         }
                                         StreamServerMessage::StageFailed { stage, error_code }
                                             if !fuji_stream_started_notified && !fuji_stream_failure_reported =>
                                         {
-                                            let error = format!("Stage failed: {} (error {})", stage, error_code);
-                                            if let Err(err) = crate::app::fuji_internal::fuji_client()
-                                                .stream_failed(fuji_game_id_for_status.as_deref(), &error)
-                                                .await
-                                            {
-                                                warn!("[Stream]: Failed to notify Fuji that the stream failed: {:?}", err);
-                                            } else {
-                                                fuji_stream_failure_reported = true;
-                                            }
+                                            fuji_stream_failure_reported = true;
+                                            fuji_failure_notification = Some((
+                                                fuji_game_id_for_status.clone(),
+                                                format!("Stage failed: {} (error {})", stage, error_code),
+                                            ));
                                         }
                                         StreamServerMessage::ConnectionTerminated { error_code }
                                             if !fuji_stream_started_notified && !fuji_stream_failure_reported =>
                                         {
-                                            let error = format!("Connection terminated before startup completed (error {})", error_code);
-                                            if let Err(err) = crate::app::fuji_internal::fuji_client()
-                                                .stream_failed(fuji_game_id_for_status.as_deref(), &error)
-                                                .await
-                                            {
-                                                warn!("[Stream]: Failed to notify Fuji that the stream terminated during startup: {:?}", err);
-                                            } else {
-                                                fuji_stream_failure_reported = true;
-                                            }
+                                            fuji_stream_failure_reported = true;
+                                            fuji_failure_notification = Some((
+                                                fuji_game_id_for_status.clone(),
+                                                format!(
+                                                    "Connection terminated before startup completed (error {})",
+                                                    error_code
+                                                ),
+                                            ));
                                         }
                                         StreamServerMessage::InternalServerError
                                             | StreamServerMessage::HostNotFound
@@ -526,17 +547,11 @@ pub async fn start_host(
                                             | StreamServerMessage::AlreadyStreaming
                                             if !fuji_stream_started_notified && !fuji_stream_failure_reported =>
                                         {
-                                            if let Err(err) = crate::app::fuji_internal::fuji_client()
-                                                .stream_failed(
-                                                    fuji_game_id_for_status.as_deref(),
-                                                    "Stream failed before connection completed",
-                                                )
-                                                .await
-                                            {
-                                                warn!("[Stream]: Failed to notify Fuji about an early startup failure: {:?}", err);
-                                            } else {
-                                                fuji_stream_failure_reported = true;
-                                            }
+                                            fuji_stream_failure_reported = true;
+                                            fuji_failure_notification = Some((
+                                                fuji_game_id_for_status.clone(),
+                                                "Stream failed before connection completed".to_string(),
+                                            ));
                                         }
                                         _ => {}
                                     }
@@ -547,6 +562,28 @@ pub async fn start_host(
                                         "[Ipc]: Tried to send a ws message but the socket is already closed"
                                     );
                                     break;
+                                }
+
+                                if let Some(game_id) = fuji_started_notification {
+                                    spawn(async move {
+                                        if let Err(err) = crate::app::fuji_internal::fuji_client()
+                                            .stream_started(game_id.as_deref())
+                                            .await
+                                        {
+                                            warn!("[Stream]: Failed to notify Fuji that the stream started: {:?}", err);
+                                        }
+                                    });
+                                }
+
+                                if let Some((game_id, error)) = fuji_failure_notification {
+                                    spawn(async move {
+                                        if let Err(err) = crate::app::fuji_internal::fuji_client()
+                                            .stream_failed(game_id.as_deref(), &error)
+                                            .await
+                                        {
+                                            warn!("[Stream]: Failed to notify Fuji that the stream failed: {:?}", err);
+                                        }
+                                    });
                                 }
                             }
                             Some(StreamerIpcMessage::InputSignaling(signaling)) => {
@@ -684,11 +721,11 @@ pub async fn start_host(
             // kill the streamer and unregister from manager
             {
                 use crate::app::streamer_manager::streamer_manager;
-                
+
                 if let Err(err) = child.kill().await {
                     warn!("failed to kill streamer child: {err}");
                 }
-                
+
                 // Unregister from process manager
                 if let Some(pid) = child_pid {
                     streamer_manager().unregister(pid).await;
@@ -766,7 +803,10 @@ pub async fn cancel_host(
         info!("[Stream]: Embedded in Fuji, stopping stream via orchestration API");
 
         if let Err(e) = fuji_client().stream_stop().await {
-            warn!("[Stream]: Fuji stream stop failed: {:?}, falling back to Sunshine cancel", e);
+            warn!(
+                "[Stream]: Fuji stream stop failed: {:?}, falling back to Sunshine cancel",
+                e
+            );
             // Fall back to direct Sunshine cancel
             host.cancel_app(&mut user).await?;
         }
@@ -797,7 +837,7 @@ pub struct SessionGameInfo {
 
 /// GET /api/session
 /// Returns current session/game status for the client
-/// 
+///
 /// This allows the client to:
 /// - Know if there's a running game to resume
 /// - Show appropriate UI (Resume/Switch/Quit options)
@@ -814,10 +854,12 @@ pub async fn get_session(
     if is_embedded_in_fuji().await {
         info!("[Session]: Embedded in Fuji, checking Fuji session state");
         if let Ok(status) = fuji_client().get_status().await {
-            info!("[Session]: Fuji status - streaming.active={}, currentGame={:?}", 
-                status.streaming.active, 
-                status.streaming.current_game.as_ref().map(|g| &g.title));
-            
+            info!(
+                "[Session]: Fuji status - streaming.active={}, currentGame={:?}",
+                status.streaming.active,
+                status.streaming.current_game.as_ref().map(|g| &g.title)
+            );
+
             if status.streaming.active {
                 if let Some(game) = status.streaming.current_game {
                     info!("[Session]: Fuji reports active game: {}", game.title);
@@ -840,12 +882,18 @@ pub async fn get_session(
     // Note: Sunshine's current_game may be 0 even if game is running (when stream is paused)
     info!("[Session]: Checking Sunshine current_game as fallback");
     let hosts = user.hosts().await?;
-    
+
     for mut host in hosts {
         if let Ok(info) = host.detailed_host(&mut user).await {
-            info!("[Session]: Sunshine host info - current_game={}", info.current_game);
+            info!(
+                "[Session]: Sunshine host info - current_game={}",
+                info.current_game
+            );
             if info.current_game != 0 {
-                info!("[Session]: Sunshine reports active game ID: {}", info.current_game);
+                info!(
+                    "[Session]: Sunshine reports active game ID: {}",
+                    info.current_game
+                );
                 return Ok(Json(SessionStatusResponse {
                     has_running_game: true,
                     current_game_id: info.current_game,
@@ -874,15 +922,15 @@ pub struct SessionPauseResponse {
 
 /// POST /api/session/pause
 /// Pauses the current streaming session without stopping the game.
-/// 
+///
 /// This cleanly disconnects the streamer from Sunshine, which causes Sunshine
 /// to enter a "paused" state. The game continues running and can be resumed
 /// by starting a new stream for the same game.
-/// 
+///
 /// Use this when:
 /// - User closes the streaming WebView
 /// - User wants to temporarily disconnect but keep the game running
-/// 
+///
 /// For stopping the game entirely, use POST /api/cancel or POST /api/session/end
 #[post("/session/pause")]
 pub async fn pause_session(
@@ -924,12 +972,12 @@ pub struct SessionEndResponse {
 
 /// POST /api/session/end
 /// Ends the current streaming session AND stops the running game.
-/// 
+///
 /// This is a convenience endpoint that:
 /// 1. Kills the streamer process
 /// 2. Calls Sunshine cancel to stop the stream
 /// 3. If embedded in Fuji, stops the game via internal API
-/// 
+///
 /// Use this when the user wants to completely quit (not just pause).
 #[post("/session/end")]
 pub async fn end_session(
@@ -955,7 +1003,7 @@ pub async fn end_session(
 
     // Cancel via Sunshine (resets current_game to 0)
     let hosts = user.hosts().await?;
-    
+
     for mut host in hosts {
         // Try to get host_id from request, or just cancel on all hosts
         if let Some(ref req) = body {
@@ -965,7 +1013,7 @@ pub async fn end_session(
                 }
             }
         }
-        
+
         if let Err(e) = host.cancel_app(&mut user).await {
             warn!("[Session]: Failed to cancel on host: {:?}", e);
         } else {
