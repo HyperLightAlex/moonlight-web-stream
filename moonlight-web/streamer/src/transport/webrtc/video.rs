@@ -34,6 +34,7 @@ use webrtc::{
     },
     rtp_transceiver::{
         RTCPFeedback,
+        rtp_sender::RTCRtpSender,
         rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType},
     },
     track::track_local::track_local_static_rtp::TrackLocalStaticRTP,
@@ -81,13 +82,14 @@ impl WebRtcVideo {
     pub fn new(
         runtime: Handle,
         peer: Weak<RTCPeerConnection>,
+        reserved_sender: Option<Arc<RTCRtpSender>>,
         supported_video_formats: SupportedVideoFormats,
         frame_queue_size: usize,
     ) -> Self {
         Self {
             clock_rate: 0,
             needs_idr: Default::default(),
-            sender: TrackLocalSender::new(runtime, peer, frame_queue_size),
+            sender: TrackLocalSender::new(runtime, peer, reserved_sender, frame_queue_size),
             codec: None,
             supported_video_formats,
             samples: Default::default(),
@@ -124,7 +126,7 @@ impl WebRtcVideo {
         };
 
         let needs_idr = self.needs_idr.clone();
-        if let Err(err) = self
+        let attach_mode = match self
             .sender
             .create_track(
                 TrackLocalStaticRTP::new(
@@ -152,11 +154,14 @@ impl WebRtcVideo {
             )
             .await
         {
-            error!(
-                "Failed to create video track with format {format:?} and codec \"{codec:?}\": {err:?}"
-            );
-            return false;
-        }
+            Ok(mode) => mode,
+            Err(err) => {
+                error!(
+                    "Failed to create video track with format {format:?} and codec \"{codec:?}\": {err:?}"
+                );
+                return false;
+            }
+        };
 
         self.clock_rate = codec.capability.clock_rate;
 
@@ -188,9 +193,8 @@ impl WebRtcVideo {
             }),
         };
 
-        // Renegotiate
-        if !inner.send_offer().await {
-            warn!("Failed to renegotiate. Video was added!");
+        if attach_mode.requires_renegotiation() && !inner.send_offer().await {
+            warn!("Failed to renegotiate after video track creation");
         }
 
         true

@@ -1,4 +1,4 @@
-use std::{sync::Weak, time::Duration};
+use std::{sync::{Arc, Weak}, time::Duration};
 
 use bytes::Bytes;
 use log::{error, warn};
@@ -8,11 +8,15 @@ use webrtc::{
     api::media_engine::{MIME_TYPE_OPUS, MediaEngine},
     media::Sample,
     peer_connection::RTCPeerConnection,
+    rtp_transceiver::rtp_sender::RTCRtpSender,
     rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType},
     track::track_local::track_local_static_sample::TrackLocalStaticSample,
 };
 
-use crate::transport::webrtc::{WebRtcInner, sender::TrackLocalSender};
+use crate::transport::webrtc::{
+    WebRtcInner,
+    sender::TrackLocalSender,
+};
 
 pub fn register_audio_codecs(media_engine: &mut MediaEngine) -> Result<(), webrtc::Error> {
     media_engine.register_codec(
@@ -39,9 +43,14 @@ pub struct WebRtcAudio {
 }
 
 impl WebRtcAudio {
-    pub fn new(runtime: Handle, peer: Weak<RTCPeerConnection>, channel_queue_size: usize) -> Self {
+    pub fn new(
+        runtime: Handle,
+        peer: Weak<RTCPeerConnection>,
+        reserved_sender: Option<Arc<RTCRtpSender>>,
+        channel_queue_size: usize,
+    ) -> Self {
         Self {
-            sender: TrackLocalSender::new(runtime, peer, channel_queue_size),
+            sender: TrackLocalSender::new(runtime, peer, reserved_sender, channel_queue_size),
             config: None,
         }
     }
@@ -68,7 +77,7 @@ impl WebRtcAudio {
             );
         }
 
-        if let Err(err) = self
+        let attach_mode = match self
             .sender
             .create_track(
                 TrackLocalStaticSample::new(
@@ -83,15 +92,17 @@ impl WebRtcAudio {
             )
             .await
         {
-            error!("Failed to create opus track: {err:?}");
-            return -1;
+            Ok(mode) => mode,
+            Err(err) => {
+                error!("Failed to create opus track: {err:?}");
+                return -1;
+            }
         };
 
         self.config = Some(stream_config);
 
-        // Renegotiate
-        if !inner.send_offer().await {
-            warn!("Failed to renegotiate. Audio was added!");
+        if attach_mode.requires_renegotiation() && !inner.send_offer().await {
+            warn!("Failed to renegotiate after audio track creation");
         }
 
         0

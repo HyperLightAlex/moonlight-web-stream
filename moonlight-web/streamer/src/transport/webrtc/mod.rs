@@ -48,6 +48,11 @@ use webrtc::{
         peer_connection_state::RTCPeerConnectionState,
         sdp::{sdp_type::RTCSdpType, session_description::RTCSessionDescription},
     },
+    rtp_transceiver::{
+        RTCRtpTransceiverInit,
+        rtp_codec::RTPCodecType,
+        rtp_transceiver_direction::RTCRtpTransceiverDirection,
+    },
 };
 
 use crate::{
@@ -188,7 +193,46 @@ pub async fn new(
 
     let (event_sender, event_receiver) = channel::<TransportEvent>(20);
 
-    // Send WebRTC Info
+    // Clone config for potential input peer creation later
+    let rtc_config_clone = rtc_config.clone();
+    let webrtc_config_clone = config.clone();
+    
+    let peer = Arc::new(api.new_peer_connection(rtc_config).await?);
+
+    let reserve_sender = |kind: RTPCodecType, label: &str| {
+        let peer = peer.clone();
+        async move {
+            match peer
+                .add_transceiver_from_kind(
+                    kind,
+                    Some(RTCRtpTransceiverInit {
+                        direction: RTCRtpTransceiverDirection::Sendonly,
+                        send_encodings: vec![],
+                    }),
+                )
+                .await
+            {
+                Ok(transceiver) => {
+                    info!("[WebRTC]: Reserved primary {label} sender before initial negotiation");
+                    Some(transceiver.sender().await)
+                }
+                Err(err) => {
+                    warn!(
+                        "[WebRTC]: Failed to reserve primary {label} sender before initial negotiation: {err:?}"
+                    );
+                    None
+                }
+            }
+        }
+    };
+
+    let video_sender = reserve_sender(RTPCodecType::Video, "video").await;
+    let audio_sender = reserve_sender(RTPCodecType::Audio, "audio").await;
+
+    let general_channel = peer.create_data_channel("general", None).await?;
+
+    // Send WebRTC Info only after primary media senders are reserved so the browser's
+    // initial offer can include matching recvonly media sections.
     if let Err(err) = event_sender
         .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
             StreamServerMessage::Setup {
@@ -203,14 +247,6 @@ pub async fn new(
         );
     };
 
-    // Clone config for potential input peer creation later
-    let rtc_config_clone = rtc_config.clone();
-    let webrtc_config_clone = config.clone();
-    
-    let peer = Arc::new(api.new_peer_connection(rtc_config).await?);
-
-    let general_channel = peer.create_data_channel("general", None).await?;
-
     let runtime = Handle::current();
     let this_owned = Arc::new(WebRtcInner {
         peer: peer.clone(),
@@ -221,12 +257,14 @@ pub async fn new(
         video: Mutex::new(WebRtcVideo::new(
             runtime.clone(),
             Arc::downgrade(&peer),
+            video_sender,
             stream_settings.video_supported_formats,
             stream_settings.video_frame_queue_size as usize,
         )),
         audio: Mutex::new(WebRtcAudio::new(
             runtime,
             Arc::downgrade(&peer),
+            audio_sender,
             stream_settings.audio_sample_queue_size as usize,
         )),
         timeout_terminate_request: Mutex::new(None),
