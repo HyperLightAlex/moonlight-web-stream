@@ -245,14 +245,19 @@ pub async fn start_host(
         let mut launch_mode: Option<String> = None;
         let fuji_game_id: Option<String> = fuji_game_id_early; // Use ID found during app lookup
         
-        {
-            use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
+        let embedded_in_fuji = {
+            use crate::app::fuji_internal::is_embedded_in_fuji;
 
             info!("[Stream]: Checking if embedded in Fuji for stream orchestration...");
             let embedded = is_embedded_in_fuji().await;
             info!("[Stream]: is_embedded_in_fuji() = {}", embedded);
+            embedded
+        };
 
-            if embedded {
+        {
+            use crate::app::fuji_internal::fuji_client;
+
+            if embedded_in_fuji {
                 info!("[Stream]: Embedded in Fuji, using stream orchestration");
 
                 let _ = send_ws_message(
@@ -454,6 +459,8 @@ pub async fn start_host(
         // Clone for forwarding input signaling from streamer
         let web_app_for_input = web_app.clone();
         let hybrid_session_id_for_input = hybrid_session_id.clone();
+        let fuji_game_id_for_status = fuji_game_id.clone();
+        let embedded_in_fuji_for_status = embedded_in_fuji;
 
         // Set up session event receiver for hybrid mode
         let (session_event_tx, mut session_event_rx) = tokio::sync::mpsc::channel::<SessionEvent>(32);
@@ -466,11 +473,75 @@ pub async fn start_host(
 
         // Redirect ipc message into ws, also handle session events
         spawn(async move {
+            let mut fuji_stream_started_notified = false;
+            let mut fuji_stream_failure_reported = false;
+
             loop {
                 tokio::select! {
                     ipc_msg = ipc_receiver.recv() => {
                         match ipc_msg {
                             Some(StreamerIpcMessage::WebSocket(message)) => {
+                                if embedded_in_fuji_for_status {
+                                    match &message {
+                                        StreamServerMessage::ConnectionComplete { .. } if !fuji_stream_started_notified => {
+                                            if let Err(err) = crate::app::fuji_internal::fuji_client()
+                                                .stream_started(fuji_game_id_for_status.as_deref())
+                                                .await
+                                            {
+                                                warn!("[Stream]: Failed to notify Fuji that the stream started: {:?}", err);
+                                            } else {
+                                                fuji_stream_started_notified = true;
+                                            }
+                                        }
+                                        StreamServerMessage::StageFailed { stage, error_code }
+                                            if !fuji_stream_started_notified && !fuji_stream_failure_reported =>
+                                        {
+                                            let error = format!("Stage failed: {} (error {})", stage, error_code);
+                                            if let Err(err) = crate::app::fuji_internal::fuji_client()
+                                                .stream_failed(fuji_game_id_for_status.as_deref(), &error)
+                                                .await
+                                            {
+                                                warn!("[Stream]: Failed to notify Fuji that the stream failed: {:?}", err);
+                                            } else {
+                                                fuji_stream_failure_reported = true;
+                                            }
+                                        }
+                                        StreamServerMessage::ConnectionTerminated { error_code }
+                                            if !fuji_stream_started_notified && !fuji_stream_failure_reported =>
+                                        {
+                                            let error = format!("Connection terminated before startup completed (error {})", error_code);
+                                            if let Err(err) = crate::app::fuji_internal::fuji_client()
+                                                .stream_failed(fuji_game_id_for_status.as_deref(), &error)
+                                                .await
+                                            {
+                                                warn!("[Stream]: Failed to notify Fuji that the stream terminated during startup: {:?}", err);
+                                            } else {
+                                                fuji_stream_failure_reported = true;
+                                            }
+                                        }
+                                        StreamServerMessage::InternalServerError
+                                            | StreamServerMessage::HostNotFound
+                                            | StreamServerMessage::AppNotFound
+                                            | StreamServerMessage::HostNotPaired
+                                            | StreamServerMessage::AlreadyStreaming
+                                            if !fuji_stream_started_notified && !fuji_stream_failure_reported =>
+                                        {
+                                            if let Err(err) = crate::app::fuji_internal::fuji_client()
+                                                .stream_failed(
+                                                    fuji_game_id_for_status.as_deref(),
+                                                    "Stream failed before connection completed",
+                                                )
+                                                .await
+                                            {
+                                                warn!("[Stream]: Failed to notify Fuji about an early startup failure: {:?}", err);
+                                            } else {
+                                                fuji_stream_failure_reported = true;
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+
                                 if let Err(Closed) = send_ws_message(&mut session, message).await {
                                     warn!(
                                         "[Ipc]: Tried to send a ws message but the socket is already closed"
@@ -505,10 +576,42 @@ pub async fn start_host(
                             }
                             Some(StreamerIpcMessage::Stop) => {
                                 debug!("[Ipc]: ipc receiver stopped by streamer");
+                                if embedded_in_fuji_for_status
+                                    && !fuji_stream_started_notified
+                                    && !fuji_stream_failure_reported
+                                {
+                                    if let Err(err) = crate::app::fuji_internal::fuji_client()
+                                        .stream_failed(
+                                            fuji_game_id_for_status.as_deref(),
+                                            "Streamer exited before connection completed",
+                                        )
+                                        .await
+                                    {
+                                        warn!("[Stream]: Failed to notify Fuji about premature streamer exit: {:?}", err);
+                                    } else {
+                                        fuji_stream_failure_reported = true;
+                                    }
+                                }
                                 break;
                             }
                             None => {
                                 debug!("[Ipc]: ipc receiver channel closed");
+                                if embedded_in_fuji_for_status
+                                    && !fuji_stream_started_notified
+                                    && !fuji_stream_failure_reported
+                                {
+                                    if let Err(err) = crate::app::fuji_internal::fuji_client()
+                                        .stream_failed(
+                                            fuji_game_id_for_status.as_deref(),
+                                            "Streamer IPC closed before connection completed",
+                                        )
+                                        .await
+                                    {
+                                        warn!("[Stream]: Failed to notify Fuji about premature IPC closure: {:?}", err);
+                                    } else {
+                                        fuji_stream_failure_reported = true;
+                                    }
+                                }
                                 break;
                             }
                         }

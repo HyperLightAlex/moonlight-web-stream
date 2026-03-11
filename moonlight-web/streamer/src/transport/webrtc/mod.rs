@@ -226,13 +226,14 @@ pub async fn new(
         }
     };
 
-    let video_sender = reserve_sender(RTPCodecType::Video, "video").await;
+    // Keep video on the legacy add-track path until the actual Sunshine codec is known.
+    let video_sender = None;
     let audio_sender = reserve_sender(RTPCodecType::Audio, "audio").await;
 
     let general_channel = peer.create_data_channel("general", None).await?;
 
-    // Send WebRTC Info only after primary media senders are reserved so the browser's
-    // initial offer can include matching recvonly media sections.
+    // Send WebRTC Info only after any pre-negotiated primary media senders are reserved
+    // so the browser's initial offer can include matching recvonly media sections.
     if let Err(err) = event_sender
         .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
             StreamServerMessage::Setup {

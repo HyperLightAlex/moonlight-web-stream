@@ -34,9 +34,11 @@ export class WebRTCTransport implements Transport {
 
         this.peer.addEventListener("track", this.onTrack.bind(this))
 
-        // Reserve media sections in the initial offer so the server can bind the real
-        // audio/video tracks later without forcing a second SDP exchange.
-        this.peer.addTransceiver("video", { direction: "recvonly" })
+        // Reserve the audio media section in the initial offer so the server can bind
+        // the real audio track later without forcing a second SDP exchange.
+        //
+        // Video stays on the legacy add-track path for now because the actual Sunshine
+        // video codec is only known once the stream starts.
         this.peer.addTransceiver("audio", { direction: "recvonly" })
 
         this.initChannels()
@@ -326,14 +328,16 @@ export class WebRTCTransport implements Transport {
             console.info(`[WebRTC]: Video track received and configured`)
             this.videoTrackHolder.track = track
             if (!this.videoTrackHolder.ontrack) {
-                throw "No video track listener registered!"
+                console.warn("[WebRTC]: Video track received before channel handler was ready")
+                return
             }
             this.videoTrackHolder.ontrack()
         } else if (track.kind == "audio") {
             console.info(`[WebRTC]: Audio track received`)
             this.audioTrackHolder.track = track
             if (!this.audioTrackHolder.ontrack) {
-                throw "No audio track listener registered!"
+                console.warn("[WebRTC]: Audio track received before channel handler was ready")
+                return
             }
             this.audioTrackHolder.ontrack()
         }

@@ -206,7 +206,17 @@ pub struct StreamLaunchGameInfo {
 #[derive(Debug, Serialize)]
 pub struct StreamStartedRequest {
     #[serde(rename = "gameId")]
-    pub game_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<String>,
+}
+
+/// Stream failed notification request
+#[derive(Debug, Serialize)]
+pub struct StreamFailedRequest {
+    #[serde(rename = "gameId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<String>,
+    pub error: String,
 }
 
 /// Session response
@@ -646,14 +656,14 @@ impl FujiInternalClient {
     }
 
     /// Notify Fuji that the stream has started successfully
-    pub async fn stream_started(&self, game_id: &str) -> Result<(), FujiInternalError> {
+    pub async fn stream_started(&self, game_id: Option<&str>) -> Result<(), FujiInternalError> {
         let url = format!("{}/stream/started", self.base_url);
         
         let request = StreamStartedRequest { 
-            game_id: game_id.to_string() 
+            game_id: game_id.map(str::to_string),
         };
 
-        info!("[Fuji] Notifying stream started for game: {}", game_id);
+        info!("[Fuji] Notifying stream started for game: {:?}", game_id);
 
         let response = self.client
             .post(&url)
@@ -665,6 +675,36 @@ impl FujiInternalClient {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             warn!("[Fuji] Stream started notification failed: {} - {}", status, body);
+        }
+
+        Ok(())
+    }
+
+    /// Notify Fuji that the stream failed to start
+    pub async fn stream_failed(
+        &self,
+        game_id: Option<&str>,
+        error: &str,
+    ) -> Result<(), FujiInternalError> {
+        let url = format!("{}/stream/failed", self.base_url);
+
+        let request = StreamFailedRequest {
+            game_id: game_id.map(str::to_string),
+            error: error.to_string(),
+        };
+
+        info!(
+            "[Fuji] Notifying stream failed for game {:?}: {}",
+            game_id,
+            error
+        );
+
+        let response = self.client.post(&url).json(&request).send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            warn!("[Fuji] Stream failed notification failed: {} - {}", status, body);
         }
 
         Ok(())
