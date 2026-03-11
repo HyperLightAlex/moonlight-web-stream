@@ -344,37 +344,65 @@ async fn get_apps(
     // 4. Get fuji_game_id by title matching with Fuji's game list
     if is_embedded_in_fuji().await {
         info!("[Apps]: Embedded in Fuji, using dynamic port detection");
-        
-        // Step 1: Get current Sunshine ports from Fuji
-        let (http_port, _https_port) = match fuji_client().get_sunshine_ports().await {
-            Ok(ports) => {
-                info!("[Apps]: Got Sunshine ports from Fuji - HTTP: {}, HTTPS: {}", ports.0, ports.1);
-                ports
-            }
-            Err(e) => {
-                warn!("[Apps]: Failed to get Sunshine ports from Fuji: {:?}, using stored ports", e);
-                // Fall through to use stored ports
-                (0, 0)
-            }
-        };
 
-        // Step 2: Update host port if we got new ports and they differ
-        // Note: This updates the host's stored address for this request
-        if http_port > 0 {
-            if let Err(e) = host.update_port(http_port).await {
-                warn!("[Apps]: Failed to update host port: {:?}", e);
+        const MAX_ATTEMPTS: u32 = 3;
+        const RETRY_DELAY_SECS: u64 = 2;
+        let mut sunshine_apps = None;
+        let mut last_error = None;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            // Step 1: Get current Sunshine ports from Fuji (re-fetch on retry - ports may have updated)
+            let (http_port, _https_port) = match fuji_client().get_sunshine_ports().await {
+                Ok(ports) => {
+                    info!("[Apps]: Got Sunshine ports from Fuji - HTTP: {}, HTTPS: {} (attempt {})", ports.0, ports.1, attempt);
+                    ports
+                }
+                Err(e) => {
+                    warn!("[Apps]: Failed to get Sunshine ports from Fuji: {:?}", e);
+                    (0, 0)
+                }
+            };
+
+            // Step 2: Update host port if we got new ports
+            if http_port > 0 {
+                if let Err(e) = host.update_port(http_port).await {
+                    warn!("[Apps]: Failed to update host port: {:?}", e);
+                }
+            }
+
+            // Step 3: Get apps via Moonlight protocol (REAL Sunshine IDs)
+            match host.list_apps(&mut user).await {
+                Ok(apps) => {
+                    info!("[Apps]: Got {} apps from Sunshine via Moonlight protocol", apps.len());
+                    sunshine_apps = Some(apps);
+                    break;
+                }
+                Err(e) => {
+                    let is_host_offline = matches!(&e, AppError::HostOffline);
+                    last_error = Some(e);
+                    // Retry on HostOffline - Sunshine may still be starting after Fuji launch
+                    if is_host_offline && attempt < MAX_ATTEMPTS {
+                        warn!(
+                            "[Apps]: HostOffline on attempt {}, retrying in {}s (Sunshine may still be starting)...",
+                            attempt, RETRY_DELAY_SECS
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(RETRY_DELAY_SECS)).await;
+                    } else {
+                        break;
+                    }
+                }
             }
         }
 
-        // Step 3: Get apps via Moonlight protocol (REAL Sunshine IDs)
-        let sunshine_apps = match host.list_apps(&mut user).await {
-            Ok(apps) => {
-                info!("[Apps]: Got {} apps from Sunshine via Moonlight protocol", apps.len());
-                apps
-            }
-            Err(e) => {
-                warn!("[Apps]: Failed to get apps from Sunshine: {:?}", e);
+        let sunshine_apps = match (sunshine_apps, last_error) {
+            (Some(apps), _) => apps,
+            (None, Some(e)) => {
+                warn!("[Apps]: Failed to get apps from Sunshine after {} attempts: {:?}", MAX_ATTEMPTS, e);
                 return Err(e.into());
+            }
+            (None, None) => {
+                warn!("[Apps]: Failed to get apps from Sunshine (unknown error)");
+                return Err(AppError::HostOffline);
             }
         };
 
