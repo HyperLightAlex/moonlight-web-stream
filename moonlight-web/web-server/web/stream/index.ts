@@ -417,7 +417,7 @@ export class Stream implements Component {
         const transport = new WebRTCTransport(this.logger, this.primaryNegotiationRole)
         transport.onsendmessage = (message) => this.sendWsMessage({ WebRtc: message })
 
-        transport.initPeer({
+        await transport.initPeer({
             iceServers: this.iceServers
         })
         this.setTransport(transport)
