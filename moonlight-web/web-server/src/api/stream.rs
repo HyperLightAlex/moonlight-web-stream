@@ -881,7 +881,7 @@ pub async fn get_session(
     // Fuji tracks actual game process state, not just streaming state
     if is_embedded_in_fuji().await {
         info!("[Session]: Embedded in Fuji, checking Fuji stream session");
-        match fuji_client().get_session().await {
+        match fuji_client().get_stream_session().await {
             Ok(session) => {
                 info!(
                     "[Session]: Fuji stream session - active={}, state={:?}, currentGame={:?}, sunshineAppId={:?}",

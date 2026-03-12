@@ -525,7 +525,7 @@ impl FujiInternalClient {
         Ok(stop_response)
     }
 
-    /// Get current streaming session
+    /// Get current legacy lifecycle session
     pub async fn get_session(&self) -> Result<SessionResponse, FujiInternalError> {
         let url = format!("{}/session", self.base_url);
 
@@ -535,6 +535,23 @@ impl FujiInternalClient {
             return Err(FujiInternalError::ApiError(
                 format!("Get session failed: {}", response.status())
             ));
+        }
+
+        let session: SessionResponse = response.json().await?;
+        Ok(session)
+    }
+
+    /// Get current stream orchestration session
+    pub async fn get_stream_session(&self) -> Result<SessionResponse, FujiInternalError> {
+        let url = format!("{}/stream/session", self.base_url);
+
+        let response = self.client.get(&url).send().await?;
+
+        if !response.status().is_success() {
+            return Err(FujiInternalError::ApiError(format!(
+                "Get stream session failed: {}",
+                response.status()
+            )));
         }
 
         let session: SessionResponse = response.json().await?;
