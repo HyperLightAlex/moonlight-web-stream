@@ -636,7 +636,17 @@ export class Stream implements Component {
         // Bitrate (not directly available, use -1)
         const bitrateMbps = -1
         
+        const hasLiveMediaStats =
+            currentFps > 0 ||
+            packetsReceived > 0 ||
+            networkRttMs > 0 ||
+            decodeLatencyMs > 0 ||
+            resolution !== "unknown"
+
         // Calculate quality using weighted scoring (same logic as stats overlay)
+        // Only mark the stream as healthy once we have real media/transport data.
+        // Otherwise the Android stale-health detector can treat repeated placeholder
+        // values during legitimate startup as a frozen connection.
         type QualityLevel = "good" | "warn" | "bad"
         
         // Helper functions for individual metric quality
@@ -707,8 +717,10 @@ export class Stream implements Component {
         const normalizedScore = totalScore / totalWeight
         
         // Map to quality: <0.5 = good, <1.2 = fair, >=1.2 = poor
-        let quality: "good" | "fair" | "poor"
-        if (normalizedScore < 0.5) {
+        let quality: "good" | "fair" | "poor" | "unknown"
+        if (!hasLiveMediaStats) {
+            quality = "unknown"
+        } else if (normalizedScore < 0.5) {
             quality = "good"
         } else if (normalizedScore < 1.2) {
             quality = "fair"
@@ -737,7 +749,7 @@ export class Stream implements Component {
 }
 
 export type StreamHealthData = {
-    quality: "good" | "fair" | "poor"
+    quality: "good" | "fair" | "poor" | "unknown"
     totalLatencyMs: number
     hostLatencyMs: number
     networkLatencyMs: number
