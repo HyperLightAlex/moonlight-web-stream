@@ -210,6 +210,14 @@ pub struct StreamStartedRequest {
     pub game_id: Option<String>,
 }
 
+/// Stream paused notification request
+#[derive(Debug, Serialize)]
+pub struct StreamPausedRequest {
+    #[serde(rename = "gameId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<String>,
+}
+
 /// Stream failed notification request
 #[derive(Debug, Serialize)]
 pub struct StreamFailedRequest {
@@ -675,6 +683,27 @@ impl FujiInternalClient {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             warn!("[Fuji] Stream started notification failed: {} - {}", status, body);
+        }
+
+        Ok(())
+    }
+
+    /// Notify Fuji that the active stream was paused while the game keeps running
+    pub async fn stream_paused(&self, game_id: Option<&str>) -> Result<(), FujiInternalError> {
+        let url = format!("{}/stream/pause", self.base_url);
+
+        let request = StreamPausedRequest {
+            game_id: game_id.map(str::to_string),
+        };
+
+        info!("[Fuji] Notifying stream paused for game: {:?}", game_id);
+
+        let response = self.client.post(&url).json(&request).send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            warn!("[Fuji] Stream pause notification failed: {} - {}", status, body);
         }
 
         Ok(())

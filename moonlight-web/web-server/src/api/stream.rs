@@ -1,4 +1,10 @@
-use std::process::Stdio;
+use std::{
+    process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -489,6 +495,10 @@ pub async fn start_host(
         let hybrid_session_id_for_input = hybrid_session_id.clone();
         let fuji_game_id_for_status = fuji_game_id.clone();
         let embedded_in_fuji_for_status = embedded_in_fuji;
+        let fuji_stream_started_state = Arc::new(AtomicBool::new(false));
+        let fuji_stream_started_for_status = fuji_stream_started_state.clone();
+        let fuji_stream_started_for_disconnect = fuji_stream_started_state.clone();
+        let fuji_game_id_for_disconnect = fuji_game_id.clone();
 
         // Set up session event receiver for hybrid mode
         let (session_event_tx, mut session_event_rx) =
@@ -517,6 +527,7 @@ pub async fn start_host(
                                     match &message {
                                         StreamServerMessage::ConnectionComplete { .. } if !fuji_stream_started_notified => {
                                             fuji_stream_started_notified = true;
+                                            fuji_stream_started_for_status.store(true, Ordering::Release);
                                             fuji_started_notification = Some(fuji_game_id_for_status.clone());
                                         }
                                         StreamServerMessage::StageFailed { stage, error_code }
@@ -773,6 +784,23 @@ pub async fn start_host(
         info!("[Stream]: Primary WebSocket closed, sending stop signal to streamer");
         ipc_sender.send(ServerIpcMessage::Stop).await;
         info!("[Stream]: Stop signal sent, game will keep running for potential reconnection");
+
+        if embedded_in_fuji
+            && fuji_stream_started_for_disconnect.load(Ordering::Acquire)
+        {
+            let game_id = fuji_game_id_for_disconnect.clone();
+            spawn(async move {
+                if let Err(err) = crate::app::fuji_internal::fuji_client()
+                    .stream_paused(game_id.as_deref())
+                    .await
+                {
+                    warn!(
+                        "[Stream]: Failed to notify Fuji that the stream paused after primary disconnect: {:?}",
+                        err
+                    );
+                }
+            });
+        }
     });
 
     Ok(response)
@@ -936,6 +964,7 @@ pub struct SessionPauseResponse {
 pub async fn pause_session(
     _user: AuthenticatedUser,
 ) -> Result<Json<SessionPauseResponse>, AppError> {
+    use crate::app::fuji_internal::{fuji_client, is_embedded_in_fuji};
     use crate::app::streamer_manager::streamer_manager;
 
     info!("[Session]: Pause requested - killing streamer to pause stream (game will keep running)");
@@ -947,6 +976,15 @@ pub async fn pause_session(
 
     // Also clean up any orphaned streamers
     streamer_manager().kill_orphaned_streamers().await;
+
+    if is_embedded_in_fuji().await {
+        if let Err(err) = fuji_client().stream_paused(None).await {
+            warn!(
+                "[Session]: Failed to notify Fuji that the stream paused: {:?}",
+                err
+            );
+        }
+    }
 
     info!("[Session]: Stream paused - Sunshine should now be in paused state");
 
