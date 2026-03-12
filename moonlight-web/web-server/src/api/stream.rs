@@ -1077,11 +1077,23 @@ pub async fn end_session(
     streamer_manager().kill_all_tracked().await;
     streamer_manager().kill_orphaned_streamers().await;
 
-    // End Fuji session if embedded (stops the game process)
+    // End Fuji stream session if embedded. This clears Fuji's stream orchestration state
+    // so app-facing active-session polling drops immediately on explicit quit.
     if is_embedded_in_fuji().await {
-        info!("[Session]: Ending Fuji session to stop game");
-        if let Err(e) = fuji_client().end_session().await {
-            warn!("[Session]: Failed to end Fuji session: {:?}", e);
+        info!("[Session]: Ending Fuji stream session to stop game");
+        if let Err(e) = fuji_client().stream_stop().await {
+            warn!(
+                "[Session]: Failed to stop Fuji stream session via orchestration API: {:?}",
+                e
+            );
+
+            // Fallback to the legacy lifecycle session cleanup path for older/inconsistent builds.
+            if let Err(legacy_err) = fuji_client().end_session().await {
+                warn!(
+                    "[Session]: Failed to end legacy Fuji session after stream stop failure: {:?}",
+                    legacy_err
+                );
+            }
         }
     }
 
