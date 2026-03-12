@@ -69,7 +69,7 @@ export class Stream implements Component {
 
     private ws: WebSocket
     private iceServers: Array<RTCIceServer> | null = null
-    private primaryNegotiationRole: PrimaryNegotiationRole = "ClientOffer"
+    private primaryNegotiationRole: PrimaryNegotiationRole = "clientoffer"
     private pendingWebRtcMessages: Array<StreamSignalingMessage> = []
     private sessionToken: string | null = null
 
@@ -320,7 +320,7 @@ export class Stream implements Component {
         // -- WebRTC Config
         else if ("Setup" in message) {
             const iceServers = message.Setup.ice_servers
-            const primaryNegotiationRole = message.Setup.primary_negotiation_role ?? "ClientOffer"
+            const primaryNegotiationRole = message.Setup.primary_negotiation_role ?? "clientoffer"
             const sessionToken = message.Setup.session_token
 
             this.iceServers = iceServers

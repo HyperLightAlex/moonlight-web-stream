@@ -10,7 +10,7 @@ export class WebRTCTransport implements Transport {
 
     private peer: RTCPeerConnection | null = null
 
-    constructor(logger?: Logger, negotiationRole: PrimaryNegotiationRole = "ClientOffer") {
+    constructor(logger?: Logger, negotiationRole: PrimaryNegotiationRole = "clientoffer") {
         this.logger = logger ?? null
         this.negotiationRole = negotiationRole
     }
@@ -42,7 +42,7 @@ export class WebRTCTransport implements Transport {
         // Maybe we already received data
         if (this.remoteDescription) {
             await this.handleRemoteDescription(this.remoteDescription)
-        } else if (this.negotiationRole === "ClientOffer") {
+        } else if (this.negotiationRole === "clientoffer") {
             await this.onNegotiationNeeded()
         } else {
             this.logger?.debug("Waiting for server-created offer before starting primary WebRTC negotiation")
@@ -293,7 +293,7 @@ export class WebRTCTransport implements Transport {
             const transportChannel = new WebRTCDataTransportChannel(channel)
             this.channels[id] = transportChannel
 
-            if (this.negotiationRole === "ClientOffer") {
+            if (this.negotiationRole === "clientoffer") {
                 const dataChannel = this.peer.createDataChannel(channel.toLowerCase(), {
                     // TODO: use id
                     // id,

@@ -227,7 +227,7 @@ struct StreamInfo {
     launch_mode: Option<String>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PendingConnectionComplete {
     capabilities: StreamCapabilities,
     video_setup: VideoSetup,
