@@ -231,6 +231,7 @@ pub struct StreamFailedRequest {
 #[derive(Debug, Deserialize)]
 pub struct SessionResponse {
     pub active: bool,
+    pub state: Option<String>,
     #[serde(rename = "sessionId")]
     pub session_id: Option<String>,
     pub game: Option<SessionGameInfo>,
@@ -243,6 +244,8 @@ pub struct SessionResponse {
 pub struct SessionGameInfo {
     pub id: String,
     pub title: String,
+    #[serde(rename = "sunshineAppId")]
+    pub sunshine_app_id: Option<u32>,
 }
 
 /// Fuji status response

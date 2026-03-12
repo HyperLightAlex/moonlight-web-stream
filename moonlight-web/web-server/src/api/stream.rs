@@ -880,7 +880,53 @@ pub async fn get_session(
     // Try to get current game from Fuji first (more reliable for Fuji-managed games)
     // Fuji tracks actual game process state, not just streaming state
     if is_embedded_in_fuji().await {
-        info!("[Session]: Embedded in Fuji, checking Fuji session state");
+        info!("[Session]: Embedded in Fuji, checking Fuji stream session");
+        match fuji_client().get_session().await {
+            Ok(session) => {
+                info!(
+                    "[Session]: Fuji stream session - active={}, state={:?}, currentGame={:?}, sunshineAppId={:?}",
+                    session.active,
+                    session.state,
+                    session.game.as_ref().map(|g| &g.title),
+                    session.game.as_ref().and_then(|g| g.sunshine_app_id)
+                );
+
+                if session.active {
+                    if let Some(game) = session.game {
+                        let current_game_id = game.sunshine_app_id.unwrap_or(0);
+                        if current_game_id == 0 {
+                            warn!(
+                                "[Session]: Fuji reports active game '{}' but no Sunshine app ID; active-session affordances may be degraded",
+                                game.title
+                            );
+                        } else {
+                            info!(
+                                "[Session]: Fuji reports active game '{}' with Sunshine app ID {}",
+                                game.title, current_game_id
+                            );
+                        }
+
+                        return Ok(Json(SessionStatusResponse {
+                            has_running_game: true,
+                            current_game_id,
+                            game: Some(SessionGameInfo {
+                                id: game.id,
+                                title: game.title,
+                            }),
+                        }));
+                    }
+
+                    warn!(
+                        "[Session]: Fuji reports an active stream session but no game payload; falling back to status/Sunshine"
+                    );
+                }
+            }
+            Err(err) => {
+                warn!("[Session]: Failed to get Fuji stream session: {}", err);
+            }
+        }
+
+        info!("[Session]: Falling back to Fuji status");
         if let Ok(status) = fuji_client().get_status().await {
             info!(
                 "[Session]: Fuji status - streaming.active={}, currentGame={:?}",
@@ -890,10 +936,10 @@ pub async fn get_session(
 
             if status.streaming.active {
                 if let Some(game) = status.streaming.current_game {
-                    info!("[Session]: Fuji reports active game: {}", game.title);
+                    info!("[Session]: Fuji status reports active game: {}", game.title);
                     return Ok(Json(SessionStatusResponse {
                         has_running_game: true,
-                        current_game_id: 0, // Fuji doesn't use Sunshine app IDs
+                        current_game_id: 0,
                         game: Some(SessionGameInfo {
                             id: game.id,
                             title: game.title,
