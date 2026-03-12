@@ -1,4 +1,4 @@
-import { StreamSignalingMessage, TransportChannelId } from "../../api_bindings.js";
+import { PrimaryNegotiationRole, StreamSignalingMessage, TransportChannelId } from "../../api_bindings.js";
 import { Logger } from "../log.js";
 import { DataTransportChannel, Transport, TRANSPORT_CHANNEL_OPTIONS, TransportAudioSetup, TransportChannel, TransportChannelIdKey, TransportChannelIdValue, TransportVideoSetup, AudioTrackTransportChannel, VideoTrackTransportChannel, TrackTransportChannel } from "./index.js";
 
@@ -6,11 +6,13 @@ export class WebRTCTransport implements Transport {
     implementationName: string = "webrtc"
 
     private logger: Logger | null
+    private negotiationRole: PrimaryNegotiationRole
 
     private peer: RTCPeerConnection | null = null
 
-    constructor(logger?: Logger) {
+    constructor(logger?: Logger, negotiationRole: PrimaryNegotiationRole = "ClientOffer") {
         this.logger = logger ?? null
+        this.negotiationRole = negotiationRole
     }
 
     async initPeer(configuration?: RTCConfiguration) {
@@ -27,6 +29,7 @@ export class WebRTCTransport implements Transport {
 
         this.peer.addEventListener("negotiationneeded", this.onNegotiationNeeded.bind(this))
         this.peer.addEventListener("icecandidate", this.onIceCandidate.bind(this))
+        this.peer.addEventListener("datachannel", this.onDataChannel.bind(this))
 
         this.peer.addEventListener("connectionstatechange", this.onConnectionStateChange.bind(this))
         this.peer.addEventListener("iceconnectionstatechange", this.onIceConnectionStateChange.bind(this))
@@ -39,8 +42,10 @@ export class WebRTCTransport implements Transport {
         // Maybe we already received data
         if (this.remoteDescription) {
             await this.handleRemoteDescription(this.remoteDescription)
-        } else {
+        } else if (this.negotiationRole === "ClientOffer") {
             await this.onNegotiationNeeded()
+        } else {
+            this.logger?.debug("Waiting for server-created offer before starting primary WebRTC negotiation")
         }
         await this.tryDequeueIceCandidates()
     }
@@ -285,16 +290,51 @@ export class WebRTCTransport implements Transport {
             }
 
             const id = TransportChannelId[channel]
-            const dataChannel = this.peer.createDataChannel(channel.toLowerCase(), {
-                // TODO: use id
-                // id,
-                // negotiated: true,
-                ordered: options.ordered,
-                maxRetransmits: options.reliable ? undefined : 0
-            })
+            const transportChannel = new WebRTCDataTransportChannel(channel)
+            this.channels[id] = transportChannel
 
-            this.channels[id] = new WebRTCDataTransportChannel(channel, dataChannel)
+            if (this.negotiationRole === "ClientOffer") {
+                const dataChannel = this.peer.createDataChannel(channel.toLowerCase(), {
+                    // TODO: use id
+                    // id,
+                    // negotiated: true,
+                    ordered: options.ordered,
+                    maxRetransmits: options.reliable ? undefined : 0
+                })
+                transportChannel.bindChannel(dataChannel)
+            }
         }
+    }
+
+    private onDataChannel(event: RTCDataChannelEvent) {
+        const dataChannel = event.channel
+        const channelId = this.getDataChannelIdForLabel(dataChannel.label)
+        if (channelId == null) {
+            console.warn(`[WebRTC]: Received unexpected data channel "${dataChannel.label}"`)
+            return
+        }
+
+        const channel = this.channels[channelId]
+        if (!channel || channel.type !== "data") {
+            console.warn(`[WebRTC]: Received data channel "${dataChannel.label}" before transport channel placeholder existed`)
+            return
+        }
+
+        ;(channel as WebRTCDataTransportChannel).bindChannel(dataChannel)
+    }
+
+    private getDataChannelIdForLabel(label: string): TransportChannelIdValue | null {
+        for (const channelRaw in TRANSPORT_CHANNEL_OPTIONS) {
+            const channel = channelRaw as TransportChannelIdKey
+            if (channel === "HOST_VIDEO" || channel === "HOST_AUDIO") {
+                continue
+            }
+            if (channel.toLowerCase() === label) {
+                return TransportChannelId[channel]
+            }
+        }
+
+        return null
     }
 
     private videoTrackHolder: TrackHolder = { ontrack: null, track: null }
@@ -567,21 +607,44 @@ class WebRTCDataTransportChannel implements DataTransportChannel {
     canSend: boolean = true
 
     private label: string
-    private channel: RTCDataChannel
+    private channel: RTCDataChannel | null = null
 
-    constructor(label: string, channel: RTCDataChannel) {
+    constructor(label: string, channel?: RTCDataChannel) {
         this.label = label
-        this.channel = channel
+        if (channel) {
+            this.bindChannel(channel)
+        }
+    }
 
+    bindChannel(channel: RTCDataChannel) {
+        if (this.channel === channel) {
+            return
+        }
+        if (this.channel) {
+            console.warn(`[WebRTC]: Data channel "${this.label}" was already bound; ignoring duplicate binding`)
+            return
+        }
+
+        this.channel = channel
         this.channel.addEventListener("message", this.onMessage.bind(this))
+        this.channel.addEventListener("open", this.onOpen.bind(this))
+
+        if (this.channel.readyState === "open") {
+            this.tryDequeueSendQueue()
+        }
+    }
+
+    private onOpen() {
+        this.tryDequeueSendQueue()
     }
 
     private sendQueue: Array<ArrayBuffer> = []
     send(message: ArrayBuffer): void {
         console.debug(this.label, message)
 
-        if (this.channel.readyState != "open") {
-            console.debug(`Tried sending packet to ${this.label} with readyState ${this.channel.readyState}. Buffering it for the future.`)
+        if (!this.channel || this.channel.readyState != "open") {
+            const readyState = this.channel?.readyState ?? "unbound"
+            console.debug(`Tried sending packet to ${this.label} with readyState ${readyState}. Buffering it for the future.`)
             this.sendQueue.push(message)
         } else {
             this.tryDequeueSendQueue()
@@ -589,6 +652,10 @@ class WebRTCDataTransportChannel implements DataTransportChannel {
         }
     }
     private tryDequeueSendQueue() {
+        if (!this.channel || this.channel.readyState != "open") {
+            return
+        }
+
         for (const message of this.sendQueue) {
             this.channel.send(message)
         }
@@ -617,6 +684,6 @@ class WebRTCDataTransportChannel implements DataTransportChannel {
         }
     }
     estimatedBufferedBytes(): number {
-        return this.channel.bufferedAmount
+        return this.channel?.bufferedAmount ?? 0
     }
 }

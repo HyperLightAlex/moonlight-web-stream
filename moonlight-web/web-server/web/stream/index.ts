@@ -1,5 +1,5 @@
 import { Api } from "../api.js"
-import { App, ConnectionStatus, StreamCapabilities, StreamClientMessage, StreamServerMessage, TransportChannelId } from "../api_bindings.js"
+import { App, ConnectionStatus, PrimaryNegotiationRole, StreamCapabilities, StreamClientMessage, StreamServerMessage, StreamSignalingMessage, TransportChannelId } from "../api_bindings.js"
 import { Component } from "../component/index.js"
 import { StreamSettings } from "../component/settings_menu.js"
 import { AudioElementPlayer } from "./audio/audio_element.js"
@@ -69,6 +69,8 @@ export class Stream implements Component {
 
     private ws: WebSocket
     private iceServers: Array<RTCIceServer> | null = null
+    private primaryNegotiationRole: PrimaryNegotiationRole = "ClientOffer"
+    private pendingWebRtcMessages: Array<StreamSignalingMessage> = []
     private sessionToken: string | null = null
 
     private videoRenderer: VideoRenderer | null = null
@@ -318,13 +320,16 @@ export class Stream implements Component {
         // -- WebRTC Config
         else if ("Setup" in message) {
             const iceServers = message.Setup.ice_servers
+            const primaryNegotiationRole = message.Setup.primary_negotiation_role ?? "ClientOffer"
             const sessionToken = message.Setup.session_token
 
             this.iceServers = iceServers
+            this.primaryNegotiationRole = primaryNegotiationRole
 
             this.debugLog(`Using WebRTC Ice Servers: ${createPrettyList(
                 iceServers.map(server => server.urls).reduce((list, url) => list.concat(url), [])
             )}`)
+            this.debugLog(`Using primary negotiation role: ${primaryNegotiationRole}`)
 
             // Handle session token for hybrid mode
             if (sessionToken) {
@@ -354,7 +359,8 @@ export class Stream implements Component {
             if (this.transport instanceof WebRTCTransport) {
                 this.transport.onReceiveMessage(webrtcMessage)
             } else {
-                this.debugLog(`Received WebRTC message but transport is currently ${this.transport?.implementationName}`)
+                this.pendingWebRtcMessages.push(webrtcMessage)
+                this.debugLog(`Buffered WebRTC message because transport is currently ${this.transport?.implementationName ?? "uninitialized"}`)
             }
         }
     }
@@ -384,6 +390,13 @@ export class Stream implements Component {
 
         this.transport = transport
 
+        if (transport instanceof WebRTCTransport && this.pendingWebRtcMessages.length > 0) {
+            for (const message of this.pendingWebRtcMessages) {
+                transport.onReceiveMessage(message)
+            }
+            this.pendingWebRtcMessages.length = 0
+        }
+
         this.input.setTransport(this.transport)
         this.stats.setTransport(this.transport)
     }
@@ -401,7 +414,7 @@ export class Stream implements Component {
             return
         }
 
-        const transport = new WebRTCTransport(this.logger)
+        const transport = new WebRTCTransport(this.logger, this.primaryNegotiationRole)
         transport.onsendmessage = (message) => this.sendWsMessage({ WebRtc: message })
 
         transport.initPeer({

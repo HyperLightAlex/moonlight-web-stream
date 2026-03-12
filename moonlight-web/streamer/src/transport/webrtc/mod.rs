@@ -10,8 +10,8 @@ use bytes::Bytes;
 use common::{
     StreamSettings,
     api_bindings::{
-        RtcIceCandidate, RtcSdpType, RtcSessionDescription, StreamClientMessage,
-        StreamServerMessage, StreamSignalingMessage, TransportChannelId,
+        PrimaryNegotiationRole, RtcIceCandidate, RtcSdpType, RtcSessionDescription,
+        StreamClientMessage, StreamServerMessage, StreamSignalingMessage, TransportChannelId,
     },
     config::{PortRange, WebRtcConfig},
     ipc::{ServerIpcMessage, StreamerIpcMessage},
@@ -75,10 +75,12 @@ mod video;
 
 struct WebRtcInner {
     peer: Arc<RTCPeerConnection>,
+    primary_negotiation_role: PrimaryNegotiationRole,
     stream_settings: StreamSettings,
     event_sender: Sender<TransportEvent>,
     general_channel: Arc<RTCDataChannel>,
     stats_channel: Mutex<Option<Arc<RTCDataChannel>>>,
+    primary_input_channels: Mutex<Vec<Arc<RTCDataChannel>>>,
     // TODO: use negotiated channels -> no rwlock required
     video: Mutex<WebRtcVideo>,
     audio: Mutex<WebRtcAudio>,
@@ -102,6 +104,10 @@ struct WebRtcInner {
     input_peer_pending: Mutex<bool>,
     // Track if primary peer has reached Connected state
     primary_peer_connected: Mutex<bool>,
+    // Track whether the initial primary server offer has been sent
+    primary_negotiation_started: Mutex<bool>,
+    // Ensure the primary ready event only fires once
+    primary_peer_ready_notified: Mutex<bool>,
 }
 
 pub async fn new(
@@ -109,6 +115,8 @@ pub async fn new(
     config: &WebRtcConfig,
     session_token: Option<String>,
 ) -> Result<(WebRTCTransportSender, WebRTCTransportEvents), anyhow::Error> {
+    let primary_negotiation_role = PrimaryNegotiationRole::ServerOffer;
+
     // -- Configure WebRTC
     let rtc_config = RTCConfiguration {
         ice_servers: config
@@ -208,6 +216,7 @@ pub async fn new(
         .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
             StreamServerMessage::Setup {
                 ice_servers: config.ice_servers.clone(),
+                primary_negotiation_role,
                 session_token,
             },
         )))
@@ -221,10 +230,12 @@ pub async fn new(
     let runtime = Handle::current();
     let this_owned = Arc::new(WebRtcInner {
         peer: peer.clone(),
+        primary_negotiation_role,
         stream_settings: stream_settings.clone(),
         event_sender,
         general_channel,
         stats_channel: Mutex::new(None),
+        primary_input_channels: Mutex::new(Vec::new()),
         video: Mutex::new(WebRtcVideo::new(
             runtime.clone(),
             Arc::downgrade(&peer),
@@ -249,6 +260,8 @@ pub async fn new(
         offer_batch_task_running: Arc::new(Mutex::new(false)),
         input_peer_pending: Mutex::new(false),
         primary_peer_connected: Mutex::new(false),
+        primary_negotiation_started: Mutex::new(false),
+        primary_peer_ready_notified: Mutex::new(false),
     });
 
     let this = Arc::downgrade(&this_owned);
@@ -284,6 +297,10 @@ pub async fn new(
     ));
 
     // Note: Keepalive channel is created by client and handled in on_data_channel
+
+    if this_owned.uses_server_offer_mode() {
+        this_owned.create_primary_server_channels().await?;
+    }
 
     drop(peer);
 
@@ -352,7 +369,202 @@ fn create_channel_message_handler(
     })
 }
 
+#[derive(Clone, Copy)]
+struct PrimaryDataChannelOptions {
+    ordered: bool,
+    reliable: bool,
+}
+
+fn primary_data_channel_options(channel_id: u8) -> PrimaryDataChannelOptions {
+    match channel_id {
+        TransportChannelId::GENERAL => PrimaryDataChannelOptions {
+            ordered: true,
+            reliable: true,
+        },
+        TransportChannelId::STATS => PrimaryDataChannelOptions {
+            ordered: true,
+            reliable: true,
+        },
+        TransportChannelId::MOUSE_RELIABLE => PrimaryDataChannelOptions {
+            ordered: true,
+            reliable: true,
+        },
+        TransportChannelId::MOUSE_ABSOLUTE => PrimaryDataChannelOptions {
+            ordered: true,
+            reliable: false,
+        },
+        TransportChannelId::MOUSE_RELATIVE => PrimaryDataChannelOptions {
+            ordered: false,
+            reliable: true,
+        },
+        TransportChannelId::KEYBOARD => PrimaryDataChannelOptions {
+            ordered: true,
+            reliable: true,
+        },
+        TransportChannelId::TOUCH => PrimaryDataChannelOptions {
+            ordered: true,
+            reliable: true,
+        },
+        TransportChannelId::CONTROLLERS => PrimaryDataChannelOptions {
+            ordered: true,
+            reliable: true,
+        },
+        channel_id if InboundPacket::CONTROLLER_CHANNELS.contains(&channel_id) => {
+            PrimaryDataChannelOptions {
+                ordered: true,
+                reliable: false,
+            }
+        }
+        _ => PrimaryDataChannelOptions {
+            ordered: true,
+            reliable: true,
+        },
+    }
+}
+
+fn primary_data_channel_init(channel_id: u8) -> RTCDataChannelInit {
+    let options = primary_data_channel_options(channel_id);
+    RTCDataChannelInit {
+        ordered: Some(options.ordered),
+        max_retransmits: if options.reliable { None } else { Some(0) },
+        ..Default::default()
+    }
+}
+
 impl WebRtcInner {
+    fn uses_server_offer_mode(&self) -> bool {
+        self.primary_negotiation_role == PrimaryNegotiationRole::ServerOffer
+    }
+
+    async fn should_send_renegotiation_offer(&self) -> bool {
+        if !self.uses_server_offer_mode() {
+            return true;
+        }
+
+        *self.primary_negotiation_started.lock().await
+    }
+
+    async fn begin_primary_negotiation(&self) -> bool {
+        let mut started = self.primary_negotiation_started.lock().await;
+        if *started {
+            return false;
+        }
+        *started = true;
+        true
+    }
+
+    async fn notify_primary_peer_ready(&self) {
+        if !self.uses_server_offer_mode() {
+            return;
+        }
+
+        let should_notify = {
+            let mut notified = self.primary_peer_ready_notified.lock().await;
+            if *notified {
+                false
+            } else {
+                *notified = true;
+                true
+            }
+        };
+
+        if !should_notify {
+            return;
+        }
+
+        if let Err(err) = self.event_sender.send(TransportEvent::PrimaryPeerReady).await {
+            warn!("Failed to send primary peer ready event: {err:?}");
+        }
+    }
+
+    async fn create_primary_data_channel(
+        self: &Arc<Self>,
+        label: &str,
+        channel_id: u8,
+    ) -> Result<Arc<RTCDataChannel>, anyhow::Error> {
+        let channel = self
+            .peer
+            .create_data_channel(label, Some(primary_data_channel_init(channel_id)))
+            .await?;
+
+        channel.on_message(create_channel_message_handler(
+            Arc::downgrade(self),
+            TransportChannel(channel_id),
+        ));
+
+        Ok(channel)
+    }
+
+    async fn create_primary_server_channels(self: &Arc<Self>) -> Result<(), anyhow::Error> {
+        info!("[WebRTC]: Creating primary server-owned data channels for server-offer mode");
+        let mut primary_channels = Vec::new();
+
+        let stats_channel = self
+            .peer
+            .create_data_channel(
+                "stats",
+                Some(primary_data_channel_init(TransportChannelId::STATS)),
+            )
+            .await?;
+
+        stats_channel.on_close({
+            let this = Arc::downgrade(self);
+
+            Box::new(move || {
+                let this = this.clone();
+
+                Box::pin(async move {
+                    let Some(this) = this.upgrade() else {
+                        warn!("Failed to close stats channel because the main type is already deallocated");
+                        return;
+                    };
+
+                    this.close_stats().await;
+                })
+            })
+        });
+
+        {
+            let mut stats = self.stats_channel.lock().await;
+            *stats = Some(stats_channel.clone());
+        }
+
+        primary_channels.push(
+            self.create_primary_data_channel("mouse_reliable", TransportChannelId::MOUSE_RELIABLE)
+                .await?,
+        );
+        primary_channels.push(
+            self.create_primary_data_channel("mouse_absolute", TransportChannelId::MOUSE_ABSOLUTE)
+                .await?,
+        );
+        primary_channels.push(
+            self.create_primary_data_channel("mouse_relative", TransportChannelId::MOUSE_RELATIVE)
+                .await?,
+        );
+        primary_channels.push(
+            self.create_primary_data_channel("keyboard", TransportChannelId::KEYBOARD)
+                .await?,
+        );
+        primary_channels.push(
+            self.create_primary_data_channel("touch", TransportChannelId::TOUCH)
+                .await?,
+        );
+        primary_channels.push(
+            self.create_primary_data_channel("controllers", TransportChannelId::CONTROLLERS)
+                .await?,
+        );
+
+        for (index, channel_id) in InboundPacket::CONTROLLER_CHANNELS.iter().enumerate() {
+            let label = format!("controller{index}");
+            primary_channels.push(self.create_primary_data_channel(&label, *channel_id).await?);
+        }
+
+        let mut stored_channels = self.primary_input_channels.lock().await;
+        *stored_channels = primary_channels;
+
+        Ok(())
+    }
+
     // -- Handle Connection State
     async fn on_ice_connection_state_change(self: &Arc<Self>, state: RTCIceConnectionState) {
         // Log ICE connection state changes with detailed info
@@ -424,7 +636,9 @@ impl WebRtcInner {
                 self.clone().create_input_peer().await;
             }
 
-            if let Err(err) = self
+            if self.uses_server_offer_mode() {
+                self.notify_primary_peer_ready().await;
+            } else if let Err(err) = self
                 .event_sender
                 .send(TransportEvent::StartStream {
                     settings: self.stream_settings.clone(),
@@ -798,6 +1012,11 @@ impl WebRtcInner {
 
         match label {
             "stats" => {
+                if self.uses_server_offer_mode() {
+                    debug!("[DataChannel]: Ignoring client-created primary stats channel in server-offer mode");
+                    return;
+                }
+
                 let mut stats = self.stats_channel.lock().await;
 
                 channel.on_close({
@@ -820,24 +1039,47 @@ impl WebRtcInner {
                 *stats = Some(channel);
             }
             "mouse_reliable" | "mouse_absolute" | "mouse_relative" => {
-                channel.on_message(create_channel_message_handler(
-                    inner,
-                    TransportChannel(TransportChannelId::MOUSE_ABSOLUTE),
-                ));
+                if self.uses_server_offer_mode() {
+                    debug!("[DataChannel]: Ignoring client-created primary input channel \"{}\" in server-offer mode", label);
+                    return;
+                }
+
+                let channel_id = match label {
+                    "mouse_reliable" => TransportChannelId::MOUSE_RELIABLE,
+                    "mouse_absolute" => TransportChannelId::MOUSE_ABSOLUTE,
+                    "mouse_relative" => TransportChannelId::MOUSE_RELATIVE,
+                    _ => unreachable!(),
+                };
+                channel.on_message(create_channel_message_handler(inner, TransportChannel(channel_id)));
             }
             "touch" => {
+                if self.uses_server_offer_mode() {
+                    debug!("[DataChannel]: Ignoring client-created primary input channel \"touch\" in server-offer mode");
+                    return;
+                }
+
                 channel.on_message(create_channel_message_handler(
                     inner,
                     TransportChannel(TransportChannelId::TOUCH),
                 ));
             }
             "keyboard" => {
+                if self.uses_server_offer_mode() {
+                    debug!("[DataChannel]: Ignoring client-created primary input channel \"keyboard\" in server-offer mode");
+                    return;
+                }
+
                 channel.on_message(create_channel_message_handler(
                     inner,
                     TransportChannel(TransportChannelId::KEYBOARD),
                 ));
             }
             "controllers" => {
+                if self.uses_server_offer_mode() {
+                    debug!("[DataChannel]: Ignoring client-created primary input channel \"controllers\" in server-offer mode");
+                    return;
+                }
+
                 channel.on_message(create_channel_message_handler(
                     inner,
                     TransportChannel(TransportChannelId::CONTROLLERS),
@@ -847,6 +1089,11 @@ impl WebRtcInner {
                 && let Ok(id) = number.parse::<usize>()
                 && id < InboundPacket::CONTROLLER_CHANNELS.len() =>
             {
+                if self.uses_server_offer_mode() {
+                    debug!("[DataChannel]: Ignoring client-created primary controller channel \"{}\" in server-offer mode", label);
+                    return;
+                }
+
                 channel.on_message(create_channel_message_handler(
                     inner,
                     TransportChannel(InboundPacket::CONTROLLER_CHANNELS[id]),
@@ -1576,6 +1823,10 @@ pub struct WebRTCTransportSender {
 
 #[async_trait]
 impl TransportSender for WebRTCTransportSender {
+    fn start_stream_before_connected(&self) -> bool {
+        self.inner.uses_server_offer_mode()
+    }
+
     async fn setup_video(&self, setup: VideoSetup) -> i32 {
         let mut video = self.inner.video.lock().await;
         if video.setup(&self.inner, setup).await {
@@ -1663,6 +1914,26 @@ impl TransportSender for WebRTCTransportSender {
             }
         }
         Ok(())
+    }
+
+    async fn start_primary_negotiation(&self) -> Result<(), TransportError> {
+        if !self.inner.uses_server_offer_mode() {
+            return Ok(());
+        }
+
+        if !self.inner.begin_primary_negotiation().await {
+            return Ok(());
+        }
+
+        if self.inner.send_offer_immediate().await {
+            Ok(())
+        } else {
+            let mut started = self.inner.primary_negotiation_started.lock().await;
+            *started = false;
+            Err(TransportError::Implementation(anyhow::anyhow!(
+                "failed to send initial primary offer"
+            )))
+        }
     }
 
     async fn on_ipc_message(&self, message: ServerIpcMessage) -> Result<(), TransportError> {

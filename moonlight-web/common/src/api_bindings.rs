@@ -488,11 +488,20 @@ pub struct StreamCapabilities {
     pub touch: bool,
 }
 
+#[derive(Serialize, Deserialize, Debug, TS, Clone, Copy, PartialEq, Eq, Default)]
+#[ts(export, export_to = EXPORT_PATH)]
+pub enum PrimaryNegotiationRole {
+    #[default]
+    ClientOffer,
+    ServerOffer,
+}
+
 #[derive(Serialize, Deserialize, Debug, TS)]
 #[ts(export, export_to = EXPORT_PATH)]
 pub enum StreamServerMessage {
     Setup {
         ice_servers: Vec<RtcIceServer>,
+        primary_negotiation_role: PrimaryNegotiationRole,
         /// Session token for hybrid mode input connection.
         /// Only present when the client requested hybrid_mode: true in Init.
         /// The native input client uses this token to join the same session.

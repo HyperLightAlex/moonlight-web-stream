@@ -38,8 +38,15 @@ impl VideoDecoder for StreamVideoDecoder {
         {
             stream.runtime.clone().block_on(async move {
                 let sender = stream.transport_sender.lock().await;
+                let result = sender.setup_video(setup).await;
+                drop(sender);
 
-                sender.setup_video(setup).await
+                if result == 0 {
+                    stream.video_setup_complete.store(true, std::sync::atomic::Ordering::Release);
+                    stream.media_setup_notify.notify_one();
+                }
+
+                result
             })
         }
     }

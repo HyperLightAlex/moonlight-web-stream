@@ -195,8 +195,14 @@ impl WebRtcVideo {
             }),
         };
 
-        if attach_mode.requires_renegotiation() && !inner.send_offer().await {
-            warn!("Failed to renegotiate after video track creation");
+        if attach_mode.requires_renegotiation() {
+            if inner.should_send_renegotiation_offer().await {
+                if !inner.send_offer().await {
+                    warn!("Failed to renegotiate after video track creation");
+                }
+            } else {
+                info!("[WebRTC-Video]: Deferring renegotiation until the initial primary offer is sent");
+            }
         }
 
         true

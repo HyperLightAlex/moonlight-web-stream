@@ -108,8 +108,14 @@ impl WebRtcAudio {
 
         info!("[WebRTC-Audio]: Track attached via {:?}", attach_mode);
 
-        if attach_mode.requires_renegotiation() && !inner.send_offer().await {
-            warn!("Failed to renegotiate after audio track creation");
+        if attach_mode.requires_renegotiation() {
+            if inner.should_send_renegotiation_offer().await {
+                if !inner.send_offer().await {
+                    warn!("Failed to renegotiate after audio track creation");
+                }
+            } else {
+                info!("[WebRTC-Audio]: Deferring renegotiation until the initial primary offer is sent");
+            }
         }
 
         0
