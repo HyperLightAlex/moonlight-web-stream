@@ -253,10 +253,7 @@ export class WebRTCTransport {
             return;
         }
         if ("jitterBufferTarget" in receiver) {
-            receiver.jitterBufferTarget = 0;
-        }
-        if ("jitterBufferDelayHint" in receiver) {
-            receiver.jitterBufferDelayHint = 0;
+            receiver.jitterBufferTarget = WebRTCTransport.VIDEO_JITTER_BUFFER_TARGET_SECONDS;
         }
     }
     applyDelayHintsToReceivers() {
@@ -471,6 +468,7 @@ export class WebRTCTransport {
         });
     }
 }
+WebRTCTransport.VIDEO_JITTER_BUFFER_TARGET_SECONDS = 0.01;
 // This receives track data
 class WebRTCInboundTrackTransportChannel {
     constructor(logger, type, label, trackHolder) {

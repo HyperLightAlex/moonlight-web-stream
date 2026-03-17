@@ -4,6 +4,7 @@ import { DataTransportChannel, Transport, TRANSPORT_CHANNEL_OPTIONS, TransportAu
 
 export class WebRTCTransport implements Transport {
     implementationName: string = "webrtc"
+    private static readonly VIDEO_JITTER_BUFFER_TARGET_SECONDS = 0.01
 
     private logger: Logger | null
     private negotiationRole: PrimaryNegotiationRole
@@ -266,10 +267,7 @@ export class WebRTCTransport implements Transport {
         // Be more aggressive only for video. Forcing audio too hard can create
         // audible artifacts, so we leave audio buffering policy to the browser.
         if ("jitterBufferTarget" in receiver) {
-            receiver.jitterBufferTarget = 0
-        }
-        if ("jitterBufferDelayHint" in receiver) {
-            receiver.jitterBufferDelayHint = 0
+            receiver.jitterBufferTarget = WebRTCTransport.VIDEO_JITTER_BUFFER_TARGET_SECONDS
         }
     }
 
