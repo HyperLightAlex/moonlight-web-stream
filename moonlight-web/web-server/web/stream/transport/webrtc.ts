@@ -9,6 +9,13 @@ export class WebRTCTransport implements Transport {
     private negotiationRole: PrimaryNegotiationRole
 
     private peer: RTCPeerConnection | null = null
+    private previousVideoStatsSample: {
+        jitterBufferDelay: number
+        jitterBufferEmittedCount: number
+        totalDecodeTime: number
+        totalProcessingDelay: number
+        framesDecoded: number
+    } | null = null
 
     constructor(logger?: Logger, negotiationRole: PrimaryNegotiationRole = "clientoffer") {
         this.logger = logger ?? null
@@ -399,6 +406,7 @@ export class WebRTCTransport implements Transport {
 
     onclose: (() => void) | null = null
     async close(): Promise<void> {
+        this.previousVideoStatsSample = null
         this.peer?.close()
     }
 
@@ -466,7 +474,8 @@ export class WebRTCTransport implements Transport {
             }
         }
 
-        // Collect raw values for calculating averages
+        // Collect raw cumulative values. WebRTC reports these as totals since the
+        // receiver started, so we convert them into per-interval averages below.
         let jitterBufferDelay = 0      // cumulative seconds
         let jitterBufferEmittedCount = 0
         let totalDecodeTime = 0        // cumulative seconds
@@ -495,6 +504,12 @@ export class WebRTCTransport implements Transport {
             if ("jitterBufferEmittedCount" in value && value.jitterBufferEmittedCount != null) {
                 jitterBufferEmittedCount = value.jitterBufferEmittedCount
             }
+            if ("jitterBufferTargetDelay" in value && value.jitterBufferTargetDelay != null) {
+                statsData.webrtcJitterBufferTargetDelayMs = (value.jitterBufferTargetDelay * 1000).toString()
+            }
+            if ("jitterBufferMinimumDelay" in value && value.jitterBufferMinimumDelay != null) {
+                statsData.webrtcJitterBufferMinimumDelayMs = (value.jitterBufferMinimumDelay * 1000).toString()
+            }
             if ("totalDecodeTime" in value && value.totalDecodeTime != null) {
                 totalDecodeTime = value.totalDecodeTime
             }
@@ -522,17 +537,38 @@ export class WebRTCTransport implements Transport {
             }
         }
 
-        // Calculate per-frame averages and convert to milliseconds
-        if (jitterBufferEmittedCount > 0) {
-            const avgJitterBufferDelayMs = (jitterBufferDelay / jitterBufferEmittedCount) * 1000
-            statsData.webrtcAvgJitterBufferDelayMs = avgJitterBufferDelayMs.toString()
+        const previousSample = this.previousVideoStatsSample
+        this.previousVideoStatsSample = {
+            jitterBufferDelay,
+            jitterBufferEmittedCount,
+            totalDecodeTime,
+            totalProcessingDelay,
+            framesDecoded,
         }
-        if (framesDecoded > 0) {
-            const avgDecodeTimeMs = (totalDecodeTime / framesDecoded) * 1000
-            statsData.webrtcAvgDecodeTimeMs = avgDecodeTimeMs.toString()
-            
-            const avgProcessingDelayMs = (totalProcessingDelay / framesDecoded) * 1000
-            statsData.webrtcAvgProcessingDelayMs = avgProcessingDelayMs.toString()
+
+        // Report interval-based averages instead of lifetime averages. The raw
+        // counters monotonically increase, so using the full totals makes the UI
+        // "buffer" value climb slowly toward the true steady-state delay.
+        if (previousSample) {
+            const emittedDelta = jitterBufferEmittedCount - previousSample.jitterBufferEmittedCount
+            const jitterDelayDelta = jitterBufferDelay - previousSample.jitterBufferDelay
+            if (emittedDelta > 0 && jitterDelayDelta >= 0) {
+                const avgJitterBufferDelayMs = (jitterDelayDelta / emittedDelta) * 1000
+                statsData.webrtcAvgJitterBufferDelayMs = avgJitterBufferDelayMs.toString()
+            }
+
+            const decodedDelta = framesDecoded - previousSample.framesDecoded
+            const decodeTimeDelta = totalDecodeTime - previousSample.totalDecodeTime
+            if (decodedDelta > 0 && decodeTimeDelta >= 0) {
+                const avgDecodeTimeMs = (decodeTimeDelta / decodedDelta) * 1000
+                statsData.webrtcAvgDecodeTimeMs = avgDecodeTimeMs.toString()
+            }
+
+            const processingDelayDelta = totalProcessingDelay - previousSample.totalProcessingDelay
+            if (decodedDelta > 0 && processingDelayDelta >= 0) {
+                const avgProcessingDelayMs = (processingDelayDelta / decodedDelta) * 1000
+                statsData.webrtcAvgProcessingDelayMs = avgProcessingDelayMs.toString()
+            }
         }
 
         return statsData

@@ -20,7 +20,7 @@ import { emptyVideoFormats, getSupportedVideoFormats, hasAnyCodec } from "./stre
 import { StreamKeys } from "./api_bindings.js";
 import { ScreenKeyboard } from "./screen_keyboard.js";
 import { FormModal } from "./component/modal/form.js";
-import { streamStatsToText } from "./stream/stats.js";
+import { streamStatsToHtml } from "./stream/stats.js";
 function startApp() {
     return __awaiter(this, void 0, void 0, function* () {
         const api = yield getApi();
@@ -94,8 +94,8 @@ class ViewerApp {
             const stats = (_a = this.getStream()) === null || _a === void 0 ? void 0 : _a.getStats();
             if (stats && stats.isEnabled()) {
                 this.statsDiv.hidden = false;
-                const text = streamStatsToText(stats.getCurrentStats());
-                this.statsDiv.innerText = text;
+                const html = streamStatsToHtml(stats.getCurrentStats());
+                this.statsDiv.innerHTML = html;
             }
             else {
                 this.statsDiv.hidden = true;

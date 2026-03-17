@@ -603,10 +603,10 @@ export class Stream implements Component {
         const networkRttMs = webrtcRttMs > 0 ? webrtcRttMs : (connectionInfo.rttMs > 0 ? connectionInfo.rttMs : (stats.streamerRttMs ?? -1))
         const networkLatencyMs = networkRttMs > 0 ? networkRttMs / 2 : -1
         
-        // Decode latency from WebRTC stats (avg decode time, already in ms)
+        // Decode latency from WebRTC stats over the latest stats interval (already in ms)
         const decodeLatencyMs = stats.transport.webrtcAvgDecodeTimeMs ? parseFloat(stats.transport.webrtcAvgDecodeTimeMs) : -1
         
-        // Jitter buffer delay from WebRTC stats (avg buffer time, already in ms)
+        // Jitter buffer delay from WebRTC stats over the latest stats interval (already in ms)
         const jitterBufferDelayMs = stats.transport.webrtcAvgJitterBufferDelayMs ? parseFloat(stats.transport.webrtcAvgJitterBufferDelayMs) : -1
         
         // Calculate total latency (sum of available components)

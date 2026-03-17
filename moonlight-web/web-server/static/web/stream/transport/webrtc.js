@@ -13,6 +13,7 @@ export class WebRTCTransport {
     constructor(logger) {
         this.implementationName = "webrtc";
         this.peer = null;
+        this.previousVideoStatsSample = null;
         this.onsendmessage = null;
         this.remoteDescription = null;
         this.iceCandidates = [];
@@ -346,6 +347,7 @@ export class WebRTCTransport {
     close() {
         return __awaiter(this, void 0, void 0, function* () {
             var _a;
+            this.previousVideoStatsSample = null;
             (_a = this.peer) === null || _a === void 0 ? void 0 : _a.close();
         });
     }
@@ -356,9 +358,27 @@ export class WebRTCTransport {
                 return {};
             }
             const stats = yield this.videoReceiver.getStats();
-            console.debug("----------------- raw video stats -----------------");
-            for (const [key, value] of stats.entries()) {
-                console.debug("raw video stats", key, value);
+            if (this.peer) {
+                try {
+                    const peerStats = yield this.peer.getStats();
+                    for (const [, value] of peerStats.entries()) {
+                        if (value.type === "candidate-pair" && value.state === "succeeded") {
+                            if (value.currentRoundTripTime != null) {
+                                statsData.webrtcRttMs = (value.currentRoundTripTime * 1000).toString();
+                            }
+                        }
+                    }
+                }
+                catch (e) {
+                    console.debug("[WebRTC]: Failed to get peer stats for RTT", e);
+                }
+            }
+            let jitterBufferDelay = 0;
+            let jitterBufferEmittedCount = 0;
+            let totalDecodeTime = 0;
+            let framesDecoded = 0;
+            let totalProcessingDelay = 0;
+            for (const [, value] of stats.entries()) {
                 if ("decoderImplementation" in value && value.decoderImplementation != null) {
                     statsData.decoderImplementation = value.decoderImplementation;
                 }
@@ -372,25 +392,28 @@ export class WebRTCTransport {
                     statsData.webrtcFps = value.framesPerSecond;
                 }
                 if ("jitterBufferDelay" in value && value.jitterBufferDelay != null) {
-                    statsData.webrtcJitterBufferDelayMs = value.jitterBufferDelay;
+                    jitterBufferDelay = value.jitterBufferDelay;
+                }
+                if ("jitterBufferEmittedCount" in value && value.jitterBufferEmittedCount != null) {
+                    jitterBufferEmittedCount = value.jitterBufferEmittedCount;
                 }
                 if ("jitterBufferTargetDelay" in value && value.jitterBufferTargetDelay != null) {
-                    statsData.webrtcJitterBufferTargetDelayMs = value.jitterBufferTargetDelay;
+                    statsData.webrtcJitterBufferTargetDelayMs = (value.jitterBufferTargetDelay * 1000).toString();
                 }
                 if ("jitterBufferMinimumDelay" in value && value.jitterBufferMinimumDelay != null) {
-                    statsData.webrtcJitterBufferMinimumDelayMs = value.jitterBufferMinimumDelay;
+                    statsData.webrtcJitterBufferMinimumDelayMs = (value.jitterBufferMinimumDelay * 1000).toString();
                 }
                 if ("jitter" in value && value.jitter != null) {
-                    statsData.webrtcJitterMs = value.jitter;
+                    statsData.webrtcJitterSec = value.jitter.toString();
                 }
                 if ("totalDecodeTime" in value && value.totalDecodeTime != null) {
-                    statsData.webrtcTotalDecodeTimeMs = value.totalDecodeTime;
-                }
-                if ("totalAssemblyTime" in value && value.totalAssemblyTime != null) {
-                    statsData.webrtcTotalAssemblyTimeMs = value.totalAssemblyTime;
+                    totalDecodeTime = value.totalDecodeTime;
                 }
                 if ("totalProcessingDelay" in value && value.totalProcessingDelay != null) {
-                    statsData.webrtcTotalProcessingDelayMs = value.totalProcessingDelay;
+                    totalProcessingDelay = value.totalProcessingDelay;
+                }
+                if ("framesDecoded" in value && value.framesDecoded != null) {
+                    framesDecoded = value.framesDecoded;
                 }
                 if ("packetsReceived" in value && value.packetsReceived != null) {
                     statsData.webrtcPacketsReceived = value.packetsReceived;
@@ -401,8 +424,29 @@ export class WebRTCTransport {
                 if ("framesDropped" in value && value.framesDropped != null) {
                     statsData.webrtcFramesDropped = value.framesDropped;
                 }
-                if ("keyFramesDecoded" in value && value.keyFramesDecoded != null) {
-                    statsData.webrtcKeyFramesDecoded = value.keyFramesDecoded;
+            }
+            const previousSample = this.previousVideoStatsSample;
+            this.previousVideoStatsSample = {
+                jitterBufferDelay,
+                jitterBufferEmittedCount,
+                totalDecodeTime,
+                totalProcessingDelay,
+                framesDecoded,
+            };
+            if (previousSample) {
+                const emittedDelta = jitterBufferEmittedCount - previousSample.jitterBufferEmittedCount;
+                const jitterDelayDelta = jitterBufferDelay - previousSample.jitterBufferDelay;
+                if (emittedDelta > 0 && jitterDelayDelta >= 0) {
+                    statsData.webrtcAvgJitterBufferDelayMs = ((jitterDelayDelta / emittedDelta) * 1000).toString();
+                }
+                const decodedDelta = framesDecoded - previousSample.framesDecoded;
+                const decodeTimeDelta = totalDecodeTime - previousSample.totalDecodeTime;
+                if (decodedDelta > 0 && decodeTimeDelta >= 0) {
+                    statsData.webrtcAvgDecodeTimeMs = ((decodeTimeDelta / decodedDelta) * 1000).toString();
+                }
+                const processingDelayDelta = totalProcessingDelay - previousSample.totalProcessingDelay;
+                if (decodedDelta > 0 && processingDelayDelta >= 0) {
+                    statsData.webrtcAvgProcessingDelayMs = ((processingDelayDelta / decodedDelta) * 1000).toString();
                 }
             }
             return statsData;
