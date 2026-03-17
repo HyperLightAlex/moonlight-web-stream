@@ -222,6 +222,9 @@ export class WebRTCTransport implements Transport {
 
         if (this.peer.connectionState == "connected") {
             type = "recover"
+            // Reapply hints on connect/reconnect as a safety net. Some browsers
+            // deliver tracks before we reach "connected", while reconnect paths
+            // may keep existing receivers alive without firing a new track event.
             this.applyDelayHintsToReceivers()
 
             if (this.onconnected) {
@@ -497,7 +500,16 @@ export class WebRTCTransport implements Transport {
         let framesDecoded = 0
         let totalProcessingDelay = 0   // cumulative seconds
 
-        for (const [key, value] of stats.entries()) {
+        for (const [, value] of stats.entries()) {
+            const mediaKind =
+                ("kind" in value && value.kind != null ? value.kind : null)
+                ?? ("mediaType" in value && value.mediaType != null ? value.mediaType : null)
+            const isVideoInboundRtp = value.type === "inbound-rtp" && (mediaKind == null || mediaKind === "video")
+
+            if (!isVideoInboundRtp) {
+                continue
+            }
+
             // Decoder info
             if ("decoderImplementation" in value && value.decoderImplementation != null) {
                 statsData.decoderImplementation = value.decoderImplementation
