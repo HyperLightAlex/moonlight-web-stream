@@ -11,6 +11,8 @@ export class WebRTCTransport implements Transport {
     private peer: RTCPeerConnection | null = null
     private previousVideoStatsSample: {
         jitterBufferDelay: number
+        jitterBufferTargetDelay: number
+        jitterBufferMinimumDelay: number
         jitterBufferEmittedCount: number
         totalDecodeTime: number
         totalProcessingDelay: number
@@ -477,6 +479,8 @@ export class WebRTCTransport implements Transport {
         // Collect raw cumulative values. WebRTC reports these as totals since the
         // receiver started, so we convert them into per-interval averages below.
         let jitterBufferDelay = 0      // cumulative seconds
+        let jitterBufferTargetDelay = 0
+        let jitterBufferMinimumDelay = 0
         let jitterBufferEmittedCount = 0
         let totalDecodeTime = 0        // cumulative seconds
         let framesDecoded = 0
@@ -505,10 +509,10 @@ export class WebRTCTransport implements Transport {
                 jitterBufferEmittedCount = value.jitterBufferEmittedCount
             }
             if ("jitterBufferTargetDelay" in value && value.jitterBufferTargetDelay != null) {
-                statsData.webrtcJitterBufferTargetDelayMs = (value.jitterBufferTargetDelay * 1000).toString()
+                jitterBufferTargetDelay = value.jitterBufferTargetDelay
             }
             if ("jitterBufferMinimumDelay" in value && value.jitterBufferMinimumDelay != null) {
-                statsData.webrtcJitterBufferMinimumDelayMs = (value.jitterBufferMinimumDelay * 1000).toString()
+                jitterBufferMinimumDelay = value.jitterBufferMinimumDelay
             }
             if ("totalDecodeTime" in value && value.totalDecodeTime != null) {
                 totalDecodeTime = value.totalDecodeTime
@@ -540,6 +544,8 @@ export class WebRTCTransport implements Transport {
         const previousSample = this.previousVideoStatsSample
         this.previousVideoStatsSample = {
             jitterBufferDelay,
+            jitterBufferTargetDelay,
+            jitterBufferMinimumDelay,
             jitterBufferEmittedCount,
             totalDecodeTime,
             totalProcessingDelay,
@@ -555,6 +561,18 @@ export class WebRTCTransport implements Transport {
             if (emittedDelta > 0 && jitterDelayDelta >= 0) {
                 const avgJitterBufferDelayMs = (jitterDelayDelta / emittedDelta) * 1000
                 statsData.webrtcAvgJitterBufferDelayMs = avgJitterBufferDelayMs.toString()
+            }
+
+            const jitterTargetDelayDelta = jitterBufferTargetDelay - previousSample.jitterBufferTargetDelay
+            if (emittedDelta > 0 && jitterTargetDelayDelta >= 0) {
+                const avgJitterBufferTargetDelayMs = (jitterTargetDelayDelta / emittedDelta) * 1000
+                statsData.webrtcJitterBufferTargetDelayMs = avgJitterBufferTargetDelayMs.toString()
+            }
+
+            const jitterMinimumDelayDelta = jitterBufferMinimumDelay - previousSample.jitterBufferMinimumDelay
+            if (emittedDelta > 0 && jitterMinimumDelayDelta >= 0) {
+                const avgJitterBufferMinimumDelayMs = (jitterMinimumDelayDelta / emittedDelta) * 1000
+                statsData.webrtcJitterBufferMinimumDelayMs = avgJitterBufferMinimumDelayMs.toString()
             }
 
             const decodedDelta = framesDecoded - previousSample.framesDecoded

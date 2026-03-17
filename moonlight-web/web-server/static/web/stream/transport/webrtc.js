@@ -374,6 +374,8 @@ export class WebRTCTransport {
                 }
             }
             let jitterBufferDelay = 0;
+            let jitterBufferTargetDelay = 0;
+            let jitterBufferMinimumDelay = 0;
             let jitterBufferEmittedCount = 0;
             let totalDecodeTime = 0;
             let framesDecoded = 0;
@@ -398,10 +400,10 @@ export class WebRTCTransport {
                     jitterBufferEmittedCount = value.jitterBufferEmittedCount;
                 }
                 if ("jitterBufferTargetDelay" in value && value.jitterBufferTargetDelay != null) {
-                    statsData.webrtcJitterBufferTargetDelayMs = (value.jitterBufferTargetDelay * 1000).toString();
+                    jitterBufferTargetDelay = value.jitterBufferTargetDelay;
                 }
                 if ("jitterBufferMinimumDelay" in value && value.jitterBufferMinimumDelay != null) {
-                    statsData.webrtcJitterBufferMinimumDelayMs = (value.jitterBufferMinimumDelay * 1000).toString();
+                    jitterBufferMinimumDelay = value.jitterBufferMinimumDelay;
                 }
                 if ("jitter" in value && value.jitter != null) {
                     statsData.webrtcJitterSec = value.jitter.toString();
@@ -428,6 +430,8 @@ export class WebRTCTransport {
             const previousSample = this.previousVideoStatsSample;
             this.previousVideoStatsSample = {
                 jitterBufferDelay,
+                jitterBufferTargetDelay,
+                jitterBufferMinimumDelay,
                 jitterBufferEmittedCount,
                 totalDecodeTime,
                 totalProcessingDelay,
@@ -438,6 +442,14 @@ export class WebRTCTransport {
                 const jitterDelayDelta = jitterBufferDelay - previousSample.jitterBufferDelay;
                 if (emittedDelta > 0 && jitterDelayDelta >= 0) {
                     statsData.webrtcAvgJitterBufferDelayMs = ((jitterDelayDelta / emittedDelta) * 1000).toString();
+                }
+                const jitterTargetDelayDelta = jitterBufferTargetDelay - previousSample.jitterBufferTargetDelay;
+                if (emittedDelta > 0 && jitterTargetDelayDelta >= 0) {
+                    statsData.webrtcJitterBufferTargetDelayMs = ((jitterTargetDelayDelta / emittedDelta) * 1000).toString();
+                }
+                const jitterMinimumDelayDelta = jitterBufferMinimumDelay - previousSample.jitterBufferMinimumDelay;
+                if (emittedDelta > 0 && jitterMinimumDelayDelta >= 0) {
+                    statsData.webrtcJitterBufferMinimumDelayMs = ((jitterMinimumDelayDelta / emittedDelta) * 1000).toString();
                 }
                 const decodedDelta = framesDecoded - previousSample.framesDecoded;
                 const decodeTimeDelta = totalDecodeTime - previousSample.totalDecodeTime;
