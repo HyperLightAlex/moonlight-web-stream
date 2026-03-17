@@ -17,7 +17,6 @@ export class WebRTCTransport {
         this.onsendmessage = null;
         this.remoteDescription = null;
         this.iceCandidates = [];
-        this.forceDelayInterval = null;
         this.channels = [];
         this.videoTrackHolder = { ontrack: null, track: null };
         this.videoReceiver = null;
@@ -217,11 +216,10 @@ export class WebRTCTransport {
         let type = null;
         if (this.peer.connectionState == "connected") {
             type = "recover";
-            this.setDelayHintInterval(true);
+            this.applyDelayHintsToReceivers();
         }
         else if ((this.peer.connectionState == "failed" || this.peer.connectionState == "disconnected") && this.peer.iceGatheringState == "complete") {
             type = "fatal";
-            this.setDelayHintInterval(false);
         }
         // Always log connection state changes to console for debugging
         console.info(`[WebRTC]: Connection state: ${this.peer.connectionState}, ICE gathering: ${this.peer.iceGatheringState}`);
@@ -247,20 +245,27 @@ export class WebRTCTransport {
         }
         (_b = this.logger) === null || _b === void 0 ? void 0 : _b.debug(`Changing Peer Ice Gathering State to ${this.peer.iceGatheringState}`);
     }
-    setDelayHintInterval(setRunning) {
-        if (this.forceDelayInterval == null && setRunning) {
-            this.forceDelayInterval = setInterval(() => {
-                if (!this.peer) {
-                    return;
-                }
-                for (const receiver of this.peer.getReceivers()) {
-                    // @ts-ignore
-                    receiver.jitterBufferTarget = receiver.jitterBufferDelayHint = receiver.playoutDelayHint = 0;
-                }
-            }, 15);
+    applyDelayHints(receiver, trackKind) {
+        if ("playoutDelayHint" in receiver) {
+            receiver.playoutDelayHint = 0;
         }
-        else if (this.forceDelayInterval != null && !setRunning) {
-            clearInterval(this.forceDelayInterval);
+        if (trackKind !== "video") {
+            return;
+        }
+        if ("jitterBufferTarget" in receiver) {
+            receiver.jitterBufferTarget = 0;
+        }
+        if ("jitterBufferDelayHint" in receiver) {
+            receiver.jitterBufferDelayHint = 0;
+        }
+    }
+    applyDelayHintsToReceivers() {
+        var _a;
+        if (!this.peer) {
+            return;
+        }
+        for (const receiver of this.peer.getReceivers()) {
+            this.applyDelayHints(receiver, ((_a = receiver.track) === null || _a === void 0 ? void 0 : _a.kind) || "");
         }
     }
     initChannels() {
@@ -301,6 +306,7 @@ export class WebRTCTransport {
         var _a;
         const track = event.track;
         console.info(`[WebRTC]: Received track: kind=${track.kind}, id=${track.id}, label=${track.label}`);
+        this.applyDelayHints(event.receiver, track.kind);
         if (track.kind == "video") {
             this.videoReceiver = event.receiver;
         }

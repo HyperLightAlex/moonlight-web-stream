@@ -221,14 +221,13 @@ export class WebRTCTransport implements Transport {
 
         if (this.peer.connectionState == "connected") {
             type = "recover"
-            this.setDelayHintInterval(true)
+            this.applyDelayHintsToReceivers()
 
             if (this.onconnected) {
                 this.onconnected()
             }
         } else if ((this.peer.connectionState == "failed" || this.peer.connectionState == "closed") && this.peer.iceGatheringState == "complete") {
             type = "fatal"
-            this.setDelayHintInterval(false)
         }
 
         // Always log connection state changes to console for debugging
@@ -254,21 +253,33 @@ export class WebRTCTransport implements Transport {
         this.logger?.debug(`Changing Peer Ice Gathering State to ${this.peer.iceGatheringState}`)
     }
 
-    private forceDelayInterval: number | null = null
-    private setDelayHintInterval(setRunning: boolean) {
-        if (this.forceDelayInterval == null && setRunning) {
-            this.forceDelayInterval = setInterval(() => {
-                if (!this.peer) {
-                    return
-                }
+    private applyDelayHints(receiver: RTCRtpReceiver, trackKind: string) {
+        if ("playoutDelayHint" in receiver) {
+            // Ask the browser to keep playout delay as low as possible.
+            receiver.playoutDelayHint = 0
+        }
 
-                for (const receiver of this.peer.getReceivers()) {
-                    // @ts-ignore
-                    receiver.jitterBufferTarget = receiver.jitterBufferDelayHint = receiver.playoutDelayHint = 0
-                }
-            }, 15)
-        } else if (this.forceDelayInterval != null && !setRunning) {
-            clearInterval(this.forceDelayInterval)
+        if (trackKind !== "video") {
+            return
+        }
+
+        // Be more aggressive only for video. Forcing audio too hard can create
+        // audible artifacts, so we leave audio buffering policy to the browser.
+        if ("jitterBufferTarget" in receiver) {
+            receiver.jitterBufferTarget = 0
+        }
+        if ("jitterBufferDelayHint" in receiver) {
+            receiver.jitterBufferDelayHint = 0
+        }
+    }
+
+    private applyDelayHintsToReceivers() {
+        if (!this.peer) {
+            return
+        }
+
+        for (const receiver of this.peer.getReceivers()) {
+            this.applyDelayHints(receiver, receiver.track?.kind ?? "")
         }
     }
 
@@ -355,6 +366,8 @@ export class WebRTCTransport implements Transport {
         const track = event.track
 
         console.info(`[WebRTC]: Received track: kind=${track.kind}, id=${track.id}, label=${track.label}`)
+
+        this.applyDelayHints(event.receiver, track.kind)
 
         if (track.kind == "video") {
             this.videoReceiver = event.receiver
