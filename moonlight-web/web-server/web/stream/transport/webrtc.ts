@@ -1,16 +1,28 @@
-import { StreamSignalingMessage, TransportChannelId } from "../../api_bindings.js";
+import { PrimaryNegotiationRole, StreamSignalingMessage, TransportChannelId } from "../../api_bindings.js";
 import { Logger } from "../log.js";
 import { DataTransportChannel, Transport, TRANSPORT_CHANNEL_OPTIONS, TransportAudioSetup, TransportChannel, TransportChannelIdKey, TransportChannelIdValue, TransportVideoSetup, AudioTrackTransportChannel, VideoTrackTransportChannel, TrackTransportChannel } from "./index.js";
 
 export class WebRTCTransport implements Transport {
     implementationName: string = "webrtc"
+    private static readonly VIDEO_JITTER_BUFFER_TARGET_SECONDS = 0.01
 
     private logger: Logger | null
+    private negotiationRole: PrimaryNegotiationRole
 
     private peer: RTCPeerConnection | null = null
+    private previousVideoStatsSample: {
+        jitterBufferDelay: number
+        jitterBufferTargetDelay: number
+        jitterBufferMinimumDelay: number
+        jitterBufferEmittedCount: number
+        totalDecodeTime: number
+        totalProcessingDelay: number
+        framesDecoded: number
+    } | null = null
 
-    constructor(logger?: Logger) {
+    constructor(logger?: Logger, negotiationRole: PrimaryNegotiationRole = "clientoffer") {
         this.logger = logger ?? null
+        this.negotiationRole = negotiationRole
     }
 
     async initPeer(configuration?: RTCConfiguration) {
@@ -27,6 +39,7 @@ export class WebRTCTransport implements Transport {
 
         this.peer.addEventListener("negotiationneeded", this.onNegotiationNeeded.bind(this))
         this.peer.addEventListener("icecandidate", this.onIceCandidate.bind(this))
+        this.peer.addEventListener("datachannel", this.onDataChannel.bind(this))
 
         this.peer.addEventListener("connectionstatechange", this.onConnectionStateChange.bind(this))
         this.peer.addEventListener("iceconnectionstatechange", this.onIceConnectionStateChange.bind(this))
@@ -39,8 +52,10 @@ export class WebRTCTransport implements Transport {
         // Maybe we already received data
         if (this.remoteDescription) {
             await this.handleRemoteDescription(this.remoteDescription)
-        } else {
+        } else if (this.negotiationRole === "clientoffer") {
             await this.onNegotiationNeeded()
+        } else {
+            this.logger?.debug("Waiting for server-created offer before starting primary WebRTC negotiation")
         }
         await this.tryDequeueIceCandidates()
     }
@@ -207,14 +222,16 @@ export class WebRTCTransport implements Transport {
 
         if (this.peer.connectionState == "connected") {
             type = "recover"
-            this.setDelayHintInterval(true)
+            // Reapply hints on connect/reconnect as a safety net. Some browsers
+            // deliver tracks before we reach "connected", while reconnect paths
+            // may keep existing receivers alive without firing a new track event.
+            this.applyDelayHintsToReceivers()
 
             if (this.onconnected) {
                 this.onconnected()
             }
         } else if ((this.peer.connectionState == "failed" || this.peer.connectionState == "closed") && this.peer.iceGatheringState == "complete") {
             type = "fatal"
-            this.setDelayHintInterval(false)
         }
 
         // Always log connection state changes to console for debugging
@@ -240,21 +257,30 @@ export class WebRTCTransport implements Transport {
         this.logger?.debug(`Changing Peer Ice Gathering State to ${this.peer.iceGatheringState}`)
     }
 
-    private forceDelayInterval: number | null = null
-    private setDelayHintInterval(setRunning: boolean) {
-        if (this.forceDelayInterval == null && setRunning) {
-            this.forceDelayInterval = setInterval(() => {
-                if (!this.peer) {
-                    return
-                }
+    private applyDelayHints(receiver: RTCRtpReceiver, trackKind: string) {
+        if ("playoutDelayHint" in receiver) {
+            // Ask the browser to keep playout delay as low as possible.
+            receiver.playoutDelayHint = 0
+        }
 
-                for (const receiver of this.peer.getReceivers()) {
-                    // @ts-ignore
-                    receiver.jitterBufferTarget = receiver.jitterBufferDelayHint = receiver.playoutDelayHint = 0
-                }
-            }, 15)
-        } else if (this.forceDelayInterval != null && !setRunning) {
-            clearInterval(this.forceDelayInterval)
+        if (trackKind !== "video") {
+            return
+        }
+
+        // Be more aggressive only for video. Forcing audio too hard can create
+        // audible artifacts, so we leave audio buffering policy to the browser.
+        if ("jitterBufferTarget" in receiver) {
+            receiver.jitterBufferTarget = WebRTCTransport.VIDEO_JITTER_BUFFER_TARGET_SECONDS
+        }
+    }
+
+    private applyDelayHintsToReceivers() {
+        if (!this.peer) {
+            return
+        }
+
+        for (const receiver of this.peer.getReceivers()) {
+            this.applyDelayHints(receiver, receiver.track?.kind ?? "")
         }
     }
 
@@ -285,16 +311,51 @@ export class WebRTCTransport implements Transport {
             }
 
             const id = TransportChannelId[channel]
-            const dataChannel = this.peer.createDataChannel(channel.toLowerCase(), {
-                // TODO: use id
-                // id,
-                // negotiated: true,
-                ordered: options.ordered,
-                maxRetransmits: options.reliable ? undefined : 0
-            })
+            const transportChannel = new WebRTCDataTransportChannel(channel)
+            this.channels[id] = transportChannel
 
-            this.channels[id] = new WebRTCDataTransportChannel(channel, dataChannel)
+            if (this.negotiationRole === "clientoffer") {
+                const dataChannel = this.peer.createDataChannel(channel.toLowerCase(), {
+                    // TODO: use id
+                    // id,
+                    // negotiated: true,
+                    ordered: options.ordered,
+                    maxRetransmits: options.reliable ? undefined : 0
+                })
+                transportChannel.bindChannel(dataChannel)
+            }
         }
+    }
+
+    private onDataChannel(event: RTCDataChannelEvent) {
+        const dataChannel = event.channel
+        const channelId = this.getDataChannelIdForLabel(dataChannel.label)
+        if (channelId == null) {
+            console.warn(`[WebRTC]: Received unexpected data channel "${dataChannel.label}"`)
+            return
+        }
+
+        const channel = this.channels[channelId]
+        if (!channel || channel.type !== "data") {
+            console.warn(`[WebRTC]: Received data channel "${dataChannel.label}" before transport channel placeholder existed`)
+            return
+        }
+
+        ;(channel as WebRTCDataTransportChannel).bindChannel(dataChannel)
+    }
+
+    private getDataChannelIdForLabel(label: string): TransportChannelIdValue | null {
+        for (const channelRaw in TRANSPORT_CHANNEL_OPTIONS) {
+            const channel = channelRaw as TransportChannelIdKey
+            if (channel === "HOST_VIDEO" || channel === "HOST_AUDIO") {
+                continue
+            }
+            if (channel.toLowerCase() === label) {
+                return TransportChannelId[channel]
+            }
+        }
+
+        return null
     }
 
     private videoTrackHolder: TrackHolder = { ontrack: null, track: null }
@@ -306,6 +367,8 @@ export class WebRTCTransport implements Transport {
         const track = event.track
 
         console.info(`[WebRTC]: Received track: kind=${track.kind}, id=${track.id}, label=${track.label}`)
+
+        this.applyDelayHints(event.receiver, track.kind)
 
         if (track.kind == "video") {
             this.videoReceiver = event.receiver
@@ -321,14 +384,16 @@ export class WebRTCTransport implements Transport {
             console.info(`[WebRTC]: Video track received and configured`)
             this.videoTrackHolder.track = track
             if (!this.videoTrackHolder.ontrack) {
-                throw "No video track listener registered!"
+                console.warn("[WebRTC]: Video track received before channel handler was ready")
+                return
             }
             this.videoTrackHolder.ontrack()
         } else if (track.kind == "audio") {
             console.info(`[WebRTC]: Audio track received`)
             this.audioTrackHolder.track = track
             if (!this.audioTrackHolder.ontrack) {
-                throw "No audio track listener registered!"
+                console.warn("[WebRTC]: Audio track received before channel handler was ready")
+                return
             }
             this.audioTrackHolder.ontrack()
         }
@@ -357,6 +422,7 @@ export class WebRTCTransport implements Transport {
 
     onclose: (() => void) | null = null
     async close(): Promise<void> {
+        this.previousVideoStatsSample = null
         this.peer?.close()
     }
 
@@ -424,14 +490,26 @@ export class WebRTCTransport implements Transport {
             }
         }
 
-        // Collect raw values for calculating averages
+        // Collect raw cumulative values. WebRTC reports these as totals since the
+        // receiver started, so we convert them into per-interval averages below.
         let jitterBufferDelay = 0      // cumulative seconds
+        let jitterBufferTargetDelay = 0
+        let jitterBufferMinimumDelay = 0
         let jitterBufferEmittedCount = 0
         let totalDecodeTime = 0        // cumulative seconds
         let framesDecoded = 0
         let totalProcessingDelay = 0   // cumulative seconds
 
-        for (const [key, value] of stats.entries()) {
+        for (const [, value] of stats.entries()) {
+            const mediaKind =
+                ("kind" in value && value.kind != null ? value.kind : null)
+                ?? ("mediaType" in value && value.mediaType != null ? value.mediaType : null)
+            const isVideoInboundRtp = value.type === "inbound-rtp" && (mediaKind == null || mediaKind === "video")
+
+            if (!isVideoInboundRtp) {
+                continue
+            }
+
             // Decoder info
             if ("decoderImplementation" in value && value.decoderImplementation != null) {
                 statsData.decoderImplementation = value.decoderImplementation
@@ -452,6 +530,12 @@ export class WebRTCTransport implements Transport {
             }
             if ("jitterBufferEmittedCount" in value && value.jitterBufferEmittedCount != null) {
                 jitterBufferEmittedCount = value.jitterBufferEmittedCount
+            }
+            if ("jitterBufferTargetDelay" in value && value.jitterBufferTargetDelay != null) {
+                jitterBufferTargetDelay = value.jitterBufferTargetDelay
+            }
+            if ("jitterBufferMinimumDelay" in value && value.jitterBufferMinimumDelay != null) {
+                jitterBufferMinimumDelay = value.jitterBufferMinimumDelay
             }
             if ("totalDecodeTime" in value && value.totalDecodeTime != null) {
                 totalDecodeTime = value.totalDecodeTime
@@ -480,17 +564,52 @@ export class WebRTCTransport implements Transport {
             }
         }
 
-        // Calculate per-frame averages and convert to milliseconds
-        if (jitterBufferEmittedCount > 0) {
-            const avgJitterBufferDelayMs = (jitterBufferDelay / jitterBufferEmittedCount) * 1000
-            statsData.webrtcAvgJitterBufferDelayMs = avgJitterBufferDelayMs.toString()
+        const previousSample = this.previousVideoStatsSample
+        this.previousVideoStatsSample = {
+            jitterBufferDelay,
+            jitterBufferTargetDelay,
+            jitterBufferMinimumDelay,
+            jitterBufferEmittedCount,
+            totalDecodeTime,
+            totalProcessingDelay,
+            framesDecoded,
         }
-        if (framesDecoded > 0) {
-            const avgDecodeTimeMs = (totalDecodeTime / framesDecoded) * 1000
-            statsData.webrtcAvgDecodeTimeMs = avgDecodeTimeMs.toString()
-            
-            const avgProcessingDelayMs = (totalProcessingDelay / framesDecoded) * 1000
-            statsData.webrtcAvgProcessingDelayMs = avgProcessingDelayMs.toString()
+
+        // Report interval-based averages instead of lifetime averages. The raw
+        // counters monotonically increase, so using the full totals makes the UI
+        // "buffer" value climb slowly toward the true steady-state delay.
+        if (previousSample) {
+            const emittedDelta = jitterBufferEmittedCount - previousSample.jitterBufferEmittedCount
+            const jitterDelayDelta = jitterBufferDelay - previousSample.jitterBufferDelay
+            if (emittedDelta > 0 && jitterDelayDelta >= 0) {
+                const avgJitterBufferDelayMs = (jitterDelayDelta / emittedDelta) * 1000
+                statsData.webrtcAvgJitterBufferDelayMs = avgJitterBufferDelayMs.toString()
+            }
+
+            const jitterTargetDelayDelta = jitterBufferTargetDelay - previousSample.jitterBufferTargetDelay
+            if (emittedDelta > 0 && jitterTargetDelayDelta >= 0) {
+                const avgJitterBufferTargetDelayMs = (jitterTargetDelayDelta / emittedDelta) * 1000
+                statsData.webrtcJitterBufferTargetDelayMs = avgJitterBufferTargetDelayMs.toString()
+            }
+
+            const jitterMinimumDelayDelta = jitterBufferMinimumDelay - previousSample.jitterBufferMinimumDelay
+            if (emittedDelta > 0 && jitterMinimumDelayDelta >= 0) {
+                const avgJitterBufferMinimumDelayMs = (jitterMinimumDelayDelta / emittedDelta) * 1000
+                statsData.webrtcJitterBufferMinimumDelayMs = avgJitterBufferMinimumDelayMs.toString()
+            }
+
+            const decodedDelta = framesDecoded - previousSample.framesDecoded
+            const decodeTimeDelta = totalDecodeTime - previousSample.totalDecodeTime
+            if (decodedDelta > 0 && decodeTimeDelta >= 0) {
+                const avgDecodeTimeMs = (decodeTimeDelta / decodedDelta) * 1000
+                statsData.webrtcAvgDecodeTimeMs = avgDecodeTimeMs.toString()
+            }
+
+            const processingDelayDelta = totalProcessingDelay - previousSample.totalProcessingDelay
+            if (decodedDelta > 0 && processingDelayDelta >= 0) {
+                const avgProcessingDelayMs = (processingDelayDelta / decodedDelta) * 1000
+                statsData.webrtcAvgProcessingDelayMs = avgProcessingDelayMs.toString()
+            }
         }
 
         return statsData
@@ -534,27 +653,29 @@ class WebRTCInboundTrackTransportChannel<T extends string> implements TrackTrans
             return
         }
 
-        console.info(`[WebRTC-Channel]: onTrack called for ${this.label}, listeners count: ${this.trackListeners.length}`)
-        for (const listener of this.trackListeners) {
+        console.info(`[WebRTC-Channel]: onTrack called for ${this.label}, listeners count: ${this.trackListeners.size}`)
+        for (const [listener, lastTrack] of this.trackListeners.entries()) {
+            if (lastTrack === track) {
+                continue
+            }
+
             listener(track)
+            this.trackListeners.set(listener, track)
         }
     }
 
 
-    private trackListeners: Array<(track: MediaStreamTrack) => void> = []
+    private trackListeners: Map<(track: MediaStreamTrack) => void, MediaStreamTrack | null> = new Map()
     addTrackListener(listener: (track: MediaStreamTrack) => void): void {
         console.info(`[WebRTC-Channel]: addTrackListener called for ${this.label}, track already exists: ${!!this.trackHolder.track}`)
+        this.trackListeners.set(listener, this.trackHolder.track)
         if (this.trackHolder.track) {
             console.info(`[WebRTC-Channel]: Calling listener immediately with existing track for ${this.label}`)
             listener(this.trackHolder.track)
         }
-        this.trackListeners.push(listener)
     }
     removeTrackListener(listener: (track: MediaStreamTrack) => void): void {
-        const index = this.trackListeners.indexOf(listener)
-        if (index != -1) {
-            this.trackListeners.splice(index, 1)
-        }
+        this.trackListeners.delete(listener)
     }
 }
 
@@ -565,21 +686,44 @@ class WebRTCDataTransportChannel implements DataTransportChannel {
     canSend: boolean = true
 
     private label: string
-    private channel: RTCDataChannel
+    private channel: RTCDataChannel | null = null
 
-    constructor(label: string, channel: RTCDataChannel) {
+    constructor(label: string, channel?: RTCDataChannel) {
         this.label = label
-        this.channel = channel
+        if (channel) {
+            this.bindChannel(channel)
+        }
+    }
 
+    bindChannel(channel: RTCDataChannel) {
+        if (this.channel === channel) {
+            return
+        }
+        if (this.channel) {
+            console.warn(`[WebRTC]: Data channel "${this.label}" was already bound; ignoring duplicate binding`)
+            return
+        }
+
+        this.channel = channel
         this.channel.addEventListener("message", this.onMessage.bind(this))
+        this.channel.addEventListener("open", this.onOpen.bind(this))
+
+        if (this.channel.readyState === "open") {
+            this.tryDequeueSendQueue()
+        }
+    }
+
+    private onOpen() {
+        this.tryDequeueSendQueue()
     }
 
     private sendQueue: Array<ArrayBuffer> = []
     send(message: ArrayBuffer): void {
         console.debug(this.label, message)
 
-        if (this.channel.readyState != "open") {
-            console.debug(`Tried sending packet to ${this.label} with readyState ${this.channel.readyState}. Buffering it for the future.`)
+        if (!this.channel || this.channel.readyState != "open") {
+            const readyState = this.channel?.readyState ?? "unbound"
+            console.debug(`Tried sending packet to ${this.label} with readyState ${readyState}. Buffering it for the future.`)
             this.sendQueue.push(message)
         } else {
             this.tryDequeueSendQueue()
@@ -587,6 +731,10 @@ class WebRTCDataTransportChannel implements DataTransportChannel {
         }
     }
     private tryDequeueSendQueue() {
+        if (!this.channel || this.channel.readyState != "open") {
+            return
+        }
+
         for (const message of this.sendQueue) {
             this.channel.send(message)
         }
@@ -615,6 +763,6 @@ class WebRTCDataTransportChannel implements DataTransportChannel {
         }
     }
     estimatedBufferedBytes(): number {
-        return this.channel.bufferedAmount
+        return this.channel?.bufferedAmount ?? 0
     }
 }

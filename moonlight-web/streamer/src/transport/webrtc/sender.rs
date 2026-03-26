@@ -21,6 +21,7 @@ use webrtc::{
             playout_delay_extension::PlayoutDelayExtension,
         },
     },
+    rtp_transceiver::rtp_sender::RTCRtpSender,
     track::track_local::{
         TrackLocal, track_local_static_rtp::TrackLocalStaticRTP,
         track_local_static_sample::TrackLocalStaticSample,
@@ -33,6 +34,8 @@ where
 {
     runtime: Handle,
     peer: Weak<RTCPeerConnection>,
+    reserved_sender: Option<Arc<RTCRtpSender>>,
+    sender_read_started: bool,
     channel_queue_size: usize,
     new_samples_notify: Arc<Notify>,
     queue: Arc<Mutex<VecDeque<FrameSamples<Track>>>>,
@@ -50,10 +53,17 @@ impl<Track> TrackLocalSender<Track>
 where
     Track: TrackLike,
 {
-    pub fn new(runtime: Handle, peer: Weak<RTCPeerConnection>, channel_queue_size: usize) -> Self {
+    pub fn new(
+        runtime: Handle,
+        peer: Weak<RTCPeerConnection>,
+        reserved_sender: Option<Arc<RTCRtpSender>>,
+        channel_queue_size: usize,
+    ) -> Self {
         Self {
             runtime,
             peer,
+            reserved_sender,
+            sender_read_started: false,
             channel_queue_size,
             new_samples_notify: Default::default(),
             queue: Default::default(),
@@ -65,7 +75,7 @@ where
         &mut self,
         track: Track,
         mut on_packet: impl FnMut(Box<dyn Packet + Send + Sync>) + Send + 'static,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<TrackAttachMode, anyhow::Error> {
         let Some(peer) = self.peer.upgrade() else {
             return Err(anyhow!(
                 "Failed to create track because of missing webrtc peer!"
@@ -83,21 +93,37 @@ where
             }
         });
 
-        let track_sender = peer.add_track(track.track()).await?;
+        let track_sender = if let Some(track_sender) = &self.reserved_sender {
+            track_sender
+                .replace_track(Some(track.track()))
+                .await
+                .map_err(anyhow::Error::from)?;
+            track_sender.clone()
+        } else {
+            peer.add_track(track.track()).await?
+        };
 
-        // Read incoming RTCP packets
-        // Before these packets are returned they are processed by interceptors. For things
-        // like NACK this needs to be called.
-        self.runtime.spawn(async move {
-            let mut rtcp_buf = vec![0u8; 1500];
-            while let Ok((packets, _)) = track_sender.read(&mut rtcp_buf).await {
-                for packet in packets {
-                    on_packet(packet);
+        if !self.sender_read_started {
+            self.sender_read_started = true;
+
+            // Read incoming RTCP packets.
+            // Before these packets are returned they are processed by interceptors. For things
+            // like NACK this needs to be called.
+            self.runtime.spawn(async move {
+                let mut rtcp_buf = vec![0u8; 1500];
+                while let Ok((packets, _)) = track_sender.read(&mut rtcp_buf).await {
+                    for packet in packets {
+                        on_packet(packet);
+                    }
                 }
-            }
-        });
+            });
+        }
 
-        Ok(())
+        Ok(if self.reserved_sender.is_some() {
+            TrackAttachMode::ReservedSender
+        } else {
+            TrackAttachMode::AddedTrack
+        })
     }
 
     /// Returns if the frame will be delivered
@@ -130,6 +156,18 @@ where
         } else {
             queue.retain(|frame| frame.important);
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrackAttachMode {
+    ReservedSender,
+    AddedTrack,
+}
+
+impl TrackAttachMode {
+    pub fn requires_renegotiation(self) -> bool {
+        matches!(self, Self::AddedTrack)
     }
 }
 

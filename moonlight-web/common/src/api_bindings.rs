@@ -482,10 +482,18 @@ impl Display for RtcIceServer {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, TS)]
 #[ts(export, export_to = EXPORT_PATH)]
 pub struct StreamCapabilities {
     pub touch: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, TS, Clone, Copy, PartialEq, Eq)]
+#[ts(export, export_to = EXPORT_PATH)]
+#[serde(rename_all = "lowercase")]
+pub enum PrimaryNegotiationRole {
+    ServerOffer,
+    ClientOffer,
 }
 
 #[derive(Serialize, Deserialize, Debug, TS)]
@@ -493,6 +501,7 @@ pub struct StreamCapabilities {
 pub enum StreamServerMessage {
     Setup {
         ice_servers: Vec<RtcIceServer>,
+        primary_negotiation_role: PrimaryNegotiationRole,
         /// Session token for hybrid mode input connection.
         /// Only present when the client requested hybrid_mode: true in Init.
         /// The native input client uses this token to join the same session.

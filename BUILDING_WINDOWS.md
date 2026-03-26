@@ -284,6 +284,25 @@ The frontend exposes `window.MoonlightBridge` for native Android integration:
 
 ## Troubleshooting
 
+### "unknown option \`trailer'" when running git commit
+
+**Cause:** A wrapper (e.g. AI agent tooling or a custom script) injects a `--trailer` flag into `git commit`. The `--trailer` option was added in Git 2.22; Git 2.30.1 and older do not support it.
+
+**Workaround:** Call the Git executable directly and bypass hooks so the wrapper is not used:
+
+```powershell
+& "C:\Program Files\Git\cmd\git.exe" commit --no-verify -m "Your commit message here"
+```
+
+- **Full path** `C:\Program Files\Git\cmd\git.exe` — bypasses shell aliases and wrappers that inject `--trailer`.
+- **`--no-verify`** — skips hooks that might also add the unsupported flag.
+
+Use the same approach for other Git commands (e.g. `push`) when the wrapper causes issues:
+
+```powershell
+& "C:\Program Files\Git\cmd\git.exe" push ...
+```
+
 ### "cargo not found"
 Add Cargo to PATH: `$env:Path += ";$env:USERPROFILE\.cargo\bin"`
 

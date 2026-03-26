@@ -227,6 +227,12 @@ struct StreamInfo {
     launch_mode: Option<String>,
 }
 
+#[derive(Clone)]
+struct PendingConnectionComplete {
+    capabilities: StreamCapabilities,
+    video_setup: VideoSetup,
+}
+
 struct StreamConnection {
     pub runtime: Handle,
     pub moonlight: MoonlightInstance,
@@ -235,6 +241,10 @@ struct StreamConnection {
     pub ipc_sender: IpcSender<StreamerIpcMessage>,
     // Video
     pub stream_info: Mutex<Option<VideoSetup>>,
+    pub video_setup_complete: AtomicBool,
+    pub audio_setup_complete: AtomicBool,
+    pub media_setup_notify: Notify,
+    pub pending_connection_complete: Mutex<Option<PendingConnectionComplete>>,
     // Stream
     pub stream: RwLock<Option<MoonlightStream>>,
     pub active_gamepads: RwLock<ActiveGamepads>,
@@ -262,6 +272,10 @@ impl StreamConnection {
             settings,
             ipc_sender,
             stream_info: Mutex::new(None),
+            video_setup_complete: AtomicBool::new(false),
+            audio_setup_complete: AtomicBool::new(false),
+            media_setup_notify: Notify::new(),
+            pending_connection_complete: Mutex::new(None),
             stream: RwLock::new(None),
             active_gamepads: RwLock::new(ActiveGamepads::empty()),
             transport_sender: Mutex::new(Box::new(sender)),
@@ -299,6 +313,18 @@ impl StreamConnection {
                                     this.stop().await;
                                 }
                             });
+                        }
+                        Ok(TransportEvent::PrimaryPeerReady) => {
+                            let Some(this) = this.upgrade() else {
+                                warn!(
+                                    "Failed to get stream connection, stopping listening to events"
+                                );
+                                return;
+                            };
+
+                            if let Err(err) = this.send_connection_complete().await {
+                                warn!("Failed to send connection complete: {err:?}");
+                            }
                         }
                         Ok(TransportEvent::RecvPacket(packet)) => {
                             let Some(this) = this.upgrade() else {
@@ -363,6 +389,29 @@ impl StreamConnection {
                 }
             }
         });
+
+        let should_start_stream_immediately = {
+            let sender = this.transport_sender.lock().await;
+            sender.start_stream_before_connected()
+        };
+
+        if should_start_stream_immediately {
+            let this_for_stream = this.clone();
+            spawn(async move {
+                if let Err(err) = this_for_stream.start_stream().await {
+                    error!("Failed to start stream before connection, stopping: {err:?}");
+                    this_for_stream.stop().await;
+                    return;
+                }
+
+                let sender = this_for_stream.transport_sender.lock().await;
+                if let Err(err) = sender.start_primary_negotiation().await {
+                    error!("Failed to start primary negotiation, stopping: {err:?}");
+                    drop(sender);
+                    this_for_stream.stop().await;
+                }
+            });
+        }
 
         Ok(this)
     }
@@ -626,6 +675,8 @@ impl StreamConnection {
             }
         };
 
+        drop(host);
+
         let host_features = stream.host_features().unwrap_or_else(|err| {
             warn!("[Stream]: failed to get host features: {err:?}");
             HostFeatures::empty()
@@ -635,6 +686,21 @@ impl StreamConnection {
             touch: host_features.contains(HostFeatures::PEN_TOUCH_EVENTS),
         };
 
+        let should_wait_for_initial_media_setup = {
+            let sender = self.transport_sender.lock().await;
+            sender.start_stream_before_connected()
+        };
+
+        if should_wait_for_initial_media_setup
+            && !self
+                .wait_for_initial_media_setup(std::time::Duration::from_secs(10))
+                .await
+        {
+            return Err(anyhow::anyhow!(
+                "timed out waiting for initial audio/video setup before the primary offer"
+            ));
+        }
+
         let video_setup = {
             let video_setup = self.stream_info.lock().await;
             video_setup.unwrap_or_else(|| {
@@ -643,22 +709,104 @@ impl StreamConnection {
             })
         };
 
-        spawn(async move {
-            ipc_sender
-                .send(StreamerIpcMessage::WebSocket(
-                    StreamServerMessage::ConnectionComplete {
-                        capabilities,
-                        format: video_setup.format as u32,
-                        width: video_setup.width,
-                        height: video_setup.height,
-                        fps: video_setup.redraw_rate,
-                    },
-                ))
-                .await;
-        });
+        let should_send_connection_complete_immediately = {
+            let sender = self.transport_sender.lock().await;
+            !sender.start_stream_before_connected()
+        };
+
+        if should_send_connection_complete_immediately {
+            spawn(async move {
+                ipc_sender
+                    .send(StreamerIpcMessage::WebSocket(
+                        StreamServerMessage::ConnectionComplete {
+                            capabilities,
+                            format: video_setup.format as u32,
+                            width: video_setup.width,
+                            height: video_setup.height,
+                            fps: video_setup.redraw_rate,
+                        },
+                    ))
+                    .await;
+            });
+        } else {
+            let mut pending = self.pending_connection_complete.lock().await;
+            *pending = Some(PendingConnectionComplete {
+                capabilities,
+                video_setup,
+            });
+        }
 
         let mut stream_guard = self.stream.write().await;
         stream_guard.replace(stream);
+
+        Ok(())
+    }
+
+    async fn has_initial_media_setup(&self) -> bool {
+        if !self.video_setup_complete.load(Ordering::Acquire) {
+            return false;
+        }
+
+        if !self.audio_setup_complete.load(Ordering::Acquire) {
+            return false;
+        }
+
+        self.stream_info.lock().await.is_some()
+    }
+
+    async fn wait_for_initial_media_setup(&self, timeout: std::time::Duration) -> bool {
+        if self.has_initial_media_setup().await {
+            return true;
+        }
+
+        let result = tokio::time::timeout(timeout, async {
+            loop {
+                if self.has_initial_media_setup().await {
+                    return;
+                }
+
+                self.media_setup_notify.notified().await;
+            }
+        })
+        .await;
+
+        if result.is_err() {
+            let video_ready = self.stream_info.lock().await.is_some();
+            let video_track_ready = self.video_setup_complete.load(Ordering::Acquire);
+            let audio_ready = self.audio_setup_complete.load(Ordering::Acquire);
+            warn!(
+                "[Stream]: Timed out waiting for initial media setup before server offer (video_ready={}, video_track_ready={}, audio_ready={})",
+                video_ready,
+                video_track_ready,
+                audio_ready
+            );
+        }
+
+        self.has_initial_media_setup().await
+    }
+
+    async fn send_connection_complete(&self) -> Result<(), anyhow::Error> {
+        let pending = {
+            let mut pending = self.pending_connection_complete.lock().await;
+            pending.take()
+        };
+
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+
+        let mut ipc_sender = self.ipc_sender.clone();
+        ipc_sender
+            .send(StreamerIpcMessage::WebSocket(
+                StreamServerMessage::ConnectionComplete {
+                    capabilities: pending.capabilities,
+                    format: pending.video_setup.format as u32,
+                    width: pending.video_setup.width,
+                    height: pending.video_setup.height,
+                    fps: pending.video_setup.redraw_rate,
+                },
+            ))
+            .await;
 
         Ok(())
     }
@@ -890,8 +1038,15 @@ impl AudioDecoder for StreamAudioDecoder {
 
         stream.runtime.clone().block_on(async move {
             let sender = stream.transport_sender.lock().await;
+            let result = sender.setup_audio(audio_config, stream_config).await;
+            drop(sender);
 
-            sender.setup_audio(audio_config, stream_config).await
+            if result == 0 {
+                stream.audio_setup_complete.store(true, Ordering::Release);
+                stream.media_setup_notify.notify_one();
+            }
+
+            result
         })
     }
 

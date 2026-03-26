@@ -1,7 +1,10 @@
-use std::{sync::Weak, time::Duration};
+use std::{
+    sync::{Arc, Weak},
+    time::Duration,
+};
 
 use bytes::Bytes;
-use log::{error, warn};
+use log::{error, info, warn};
 use moonlight_common::stream::bindings::{AudioConfig, OpusMultistreamConfig};
 use tokio::runtime::Handle;
 use webrtc::{
@@ -9,6 +12,7 @@ use webrtc::{
     media::Sample,
     peer_connection::RTCPeerConnection,
     rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType},
+    rtp_transceiver::rtp_sender::RTCRtpSender,
     track::track_local::track_local_static_sample::TrackLocalStaticSample,
 };
 
@@ -39,9 +43,14 @@ pub struct WebRtcAudio {
 }
 
 impl WebRtcAudio {
-    pub fn new(runtime: Handle, peer: Weak<RTCPeerConnection>, channel_queue_size: usize) -> Self {
+    pub fn new(
+        runtime: Handle,
+        peer: Weak<RTCPeerConnection>,
+        reserved_sender: Option<Arc<RTCRtpSender>>,
+        channel_queue_size: usize,
+    ) -> Self {
         Self {
-            sender: TrackLocalSender::new(runtime, peer, channel_queue_size),
+            sender: TrackLocalSender::new(runtime, peer, reserved_sender, channel_queue_size),
             config: None,
         }
     }
@@ -54,6 +63,11 @@ impl WebRtcAudio {
         audio_config: AudioConfig,
         stream_config: OpusMultistreamConfig,
     ) -> i32 {
+        info!(
+            "[WebRTC-Audio]: Setting up audio track with sample_rate={} samples_per_frame={}",
+            stream_config.sample_rate, stream_config.samples_per_frame
+        );
+
         const SUPPORTED_SAMPLE_RATES: &[u32] = &[80000, 12000, 16000, 24000, 48000];
         if !SUPPORTED_SAMPLE_RATES.contains(&stream_config.sample_rate) {
             warn!(
@@ -68,7 +82,7 @@ impl WebRtcAudio {
             );
         }
 
-        if let Err(err) = self
+        let attach_mode = match self
             .sender
             .create_track(
                 TrackLocalStaticSample::new(
@@ -83,15 +97,25 @@ impl WebRtcAudio {
             )
             .await
         {
-            error!("Failed to create opus track: {err:?}");
-            return -1;
+            Ok(mode) => mode,
+            Err(err) => {
+                error!("Failed to create opus track: {err:?}");
+                return -1;
+            }
         };
 
         self.config = Some(stream_config);
 
-        // Renegotiate
-        if !inner.send_offer().await {
-            warn!("Failed to renegotiate. Audio was added!");
+        info!("[WebRTC-Audio]: Track attached via {:?}", attach_mode);
+
+        if attach_mode.requires_renegotiation() {
+            if inner.should_send_renegotiation_offer().await {
+                if !inner.send_offer().await {
+                    warn!("Failed to renegotiate after audio track creation");
+                }
+            } else {
+                info!("[WebRTC-Audio]: Deferring renegotiation until the initial primary offer is sent");
+            }
         }
 
         0

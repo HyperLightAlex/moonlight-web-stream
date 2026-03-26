@@ -1,5 +1,5 @@
 import { Api } from "../api.js"
-import { App, ConnectionStatus, StreamCapabilities, StreamClientMessage, StreamServerMessage, TransportChannelId } from "../api_bindings.js"
+import { App, ConnectionStatus, PrimaryNegotiationRole, StreamCapabilities, StreamClientMessage, StreamServerMessage, StreamSignalingMessage, TransportChannelId } from "../api_bindings.js"
 import { Component } from "../component/index.js"
 import { StreamSettings } from "../component/settings_menu.js"
 import { AudioElementPlayer } from "./audio/audio_element.js"
@@ -69,6 +69,8 @@ export class Stream implements Component {
 
     private ws: WebSocket
     private iceServers: Array<RTCIceServer> | null = null
+    private primaryNegotiationRole: PrimaryNegotiationRole = "clientoffer"
+    private pendingWebRtcMessages: Array<StreamSignalingMessage> = []
     private sessionToken: string | null = null
 
     private videoRenderer: VideoRenderer | null = null
@@ -259,30 +261,9 @@ export class Stream implements Component {
 
             this.stats.setVideoInfo(format ?? "Unknown", width, height, fps)
 
-            await Promise.all([
-                this.setupVideo({
-                    format,
-                    fps,
-                    width,
-                    height,
-                }),
-                // TODO: more audio info?
-                this.setupAudio()
-            ])
-
-            this.debugLog(`Using video pipeline: ${this.transport?.getChannel(TransportChannelId.HOST_VIDEO).type} (transport) -> ${this.videoRenderer?.implementationName} (renderer)`)
-            this.debugLog(`Using audio pipeline: ${this.transport?.getChannel(TransportChannelId.HOST_AUDIO).type} (transport) -> ${this.audioPlayer?.implementationName} (player)`)
-
-            // In hybrid mode, auto-start video and audio since input is handled by native client
-            // and we won't receive user interaction events in the WebView
-            if (this.hybridMode) {
-                this.debugLog("Hybrid mode: auto-starting video and audio playback")
-                // Trigger the same actions as onUserInteraction() to unmute audio and ensure video plays
-                this.videoRenderer?.onUserInteraction()
-                this.audioPlayer?.onUserInteraction()
-            }
-
-            // Notify AndroidBridge if available (for hybrid mode)
+            // Notify the native client as soon as the server reports the stream is ready.
+            // Media pipeline setup continues below, but the Android loading state should
+            // not block on renderer/player initialization.
             ;(window as any).streamConnected = true
             ;(window as any).streamWidth = width
             ;(window as any).streamHeight = height
@@ -297,17 +278,58 @@ export class Stream implements Component {
             window.dispatchEvent(new CustomEvent('streamConnected', {
                 detail: { width, height, fps, codec: format }
             }))
+
+            try {
+                await Promise.all([
+                    this.setupVideo({
+                        format,
+                        fps,
+                        width,
+                        height,
+                    }),
+                    // TODO: more audio info?
+                    this.setupAudio()
+                ])
+            } catch (err) {
+                const errorMessage = err instanceof Error ? err.message : String(err)
+                console.error("[Stream]: Failed to initialize media pipeline", err)
+                this.debugLog(`Failed to initialize media pipeline: ${errorMessage}`, "fatal")
+
+                if ((window as any).AndroidBridge?.onStreamError) {
+                    (window as any).AndroidBridge.onStreamError(`Failed to initialize media pipeline: ${errorMessage}`)
+                }
+                window.dispatchEvent(new CustomEvent('streamError', {
+                    detail: { message: `Failed to initialize media pipeline: ${errorMessage}` }
+                }))
+                return
+            }
+
+            this.debugLog(`Using video pipeline: ${this.transport?.getChannel(TransportChannelId.HOST_VIDEO).type} (transport) -> ${this.videoRenderer?.implementationName} (renderer)`)
+            this.debugLog(`Using audio pipeline: ${this.transport?.getChannel(TransportChannelId.HOST_AUDIO).type} (transport) -> ${this.audioPlayer?.implementationName} (player)`)
+
+            // In hybrid mode, auto-start video and audio since input is handled by native client
+            // and we won't receive user interaction events in the WebView
+            if (this.hybridMode) {
+                this.debugLog("Hybrid mode: auto-starting video and audio playback")
+                // Trigger the same actions as onUserInteraction() to unmute audio and ensure video plays
+                this.videoRenderer?.onUserInteraction()
+                this.audioPlayer?.onUserInteraction()
+            }
+
         }
         // -- WebRTC Config
         else if ("Setup" in message) {
             const iceServers = message.Setup.ice_servers
+            const primaryNegotiationRole = message.Setup.primary_negotiation_role ?? "clientoffer"
             const sessionToken = message.Setup.session_token
 
             this.iceServers = iceServers
+            this.primaryNegotiationRole = primaryNegotiationRole
 
             this.debugLog(`Using WebRTC Ice Servers: ${createPrettyList(
                 iceServers.map(server => server.urls).reduce((list, url) => list.concat(url), [])
             )}`)
+            this.debugLog(`Using primary negotiation role: ${primaryNegotiationRole}`)
 
             // Handle session token for hybrid mode
             if (sessionToken) {
@@ -337,7 +359,8 @@ export class Stream implements Component {
             if (this.transport instanceof WebRTCTransport) {
                 this.transport.onReceiveMessage(webrtcMessage)
             } else {
-                this.debugLog(`Received WebRTC message but transport is currently ${this.transport?.implementationName}`)
+                this.pendingWebRtcMessages.push(webrtcMessage)
+                this.debugLog(`Buffered WebRTC message because transport is currently ${this.transport?.implementationName ?? "uninitialized"}`)
             }
         }
     }
@@ -367,6 +390,13 @@ export class Stream implements Component {
 
         this.transport = transport
 
+        if (transport instanceof WebRTCTransport && this.pendingWebRtcMessages.length > 0) {
+            for (const message of this.pendingWebRtcMessages) {
+                transport.onReceiveMessage(message)
+            }
+            this.pendingWebRtcMessages.length = 0
+        }
+
         this.input.setTransport(this.transport)
         this.stats.setTransport(this.transport)
     }
@@ -384,10 +414,10 @@ export class Stream implements Component {
             return
         }
 
-        const transport = new WebRTCTransport(this.logger)
+        const transport = new WebRTCTransport(this.logger, this.primaryNegotiationRole)
         transport.onsendmessage = (message) => this.sendWsMessage({ WebRtc: message })
 
-        transport.initPeer({
+        await transport.initPeer({
             iceServers: this.iceServers
         })
         this.setTransport(transport)
@@ -573,10 +603,10 @@ export class Stream implements Component {
         const networkRttMs = webrtcRttMs > 0 ? webrtcRttMs : (connectionInfo.rttMs > 0 ? connectionInfo.rttMs : (stats.streamerRttMs ?? -1))
         const networkLatencyMs = networkRttMs > 0 ? networkRttMs / 2 : -1
         
-        // Decode latency from WebRTC stats (avg decode time, already in ms)
+        // Decode latency from WebRTC stats over the latest stats interval (already in ms)
         const decodeLatencyMs = stats.transport.webrtcAvgDecodeTimeMs ? parseFloat(stats.transport.webrtcAvgDecodeTimeMs) : -1
         
-        // Jitter buffer delay from WebRTC stats (avg buffer time, already in ms)
+        // Jitter buffer delay from WebRTC stats over the latest stats interval (already in ms)
         const jitterBufferDelayMs = stats.transport.webrtcAvgJitterBufferDelayMs ? parseFloat(stats.transport.webrtcAvgJitterBufferDelayMs) : -1
         
         // Calculate total latency (sum of available components)
@@ -606,7 +636,17 @@ export class Stream implements Component {
         // Bitrate (not directly available, use -1)
         const bitrateMbps = -1
         
+        const hasLiveMediaStats =
+            currentFps > 0 ||
+            packetsReceived > 0 ||
+            networkRttMs > 0 ||
+            decodeLatencyMs > 0 ||
+            resolution !== "unknown"
+
         // Calculate quality using weighted scoring (same logic as stats overlay)
+        // Only mark the stream as healthy once we have real media/transport data.
+        // Otherwise the Android stale-health detector can treat repeated placeholder
+        // values during legitimate startup as a frozen connection.
         type QualityLevel = "good" | "warn" | "bad"
         
         // Helper functions for individual metric quality
@@ -677,8 +717,10 @@ export class Stream implements Component {
         const normalizedScore = totalScore / totalWeight
         
         // Map to quality: <0.5 = good, <1.2 = fair, >=1.2 = poor
-        let quality: "good" | "fair" | "poor"
-        if (normalizedScore < 0.5) {
+        let quality: "good" | "fair" | "poor" | "unknown"
+        if (!hasLiveMediaStats) {
+            quality = "unknown"
+        } else if (normalizedScore < 0.5) {
             quality = "good"
         } else if (normalizedScore < 1.2) {
             quality = "fair"
@@ -707,7 +749,7 @@ export class Stream implements Component {
 }
 
 export type StreamHealthData = {
-    quality: "good" | "fair" | "poor"
+    quality: "good" | "fair" | "poor" | "unknown"
     totalLatencyMs: number
     hostLatencyMs: number
     networkLatencyMs: number

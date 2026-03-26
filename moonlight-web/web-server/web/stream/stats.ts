@@ -106,12 +106,14 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
     const hostLatencyQuality = getLatencyQuality(statsData.avgHostProcessingLatencyMs)
     const streamerLatencyQuality = getLatencyQuality(statsData.avgStreamerProcessingTimeMs)
     
-    // Decode latency from WebRTC (already in ms)
+    // Decode latency from WebRTC over the latest stats interval (already in ms)
     const decodeLatencyMs = statsData.transport.webrtcAvgDecodeTimeMs ? parseFloat(statsData.transport.webrtcAvgDecodeTimeMs) : null
     const decodeLatencyQuality = getLatencyQuality(decodeLatencyMs)
     
-    // Jitter buffer delay from WebRTC (already in ms) - time frames spend buffered before decode
+    // Jitter buffer delay from WebRTC over the latest stats interval (already in ms)
     const jitterBufferDelayMs = statsData.transport.webrtcAvgJitterBufferDelayMs ? parseFloat(statsData.transport.webrtcAvgJitterBufferDelayMs) : null
+    const jitterBufferTargetDelayMs = statsData.transport.webrtcJitterBufferTargetDelayMs ? parseFloat(statsData.transport.webrtcJitterBufferTargetDelayMs) : null
+    const jitterBufferMinimumDelayMs = statsData.transport.webrtcJitterBufferMinimumDelayMs ? parseFloat(statsData.transport.webrtcJitterBufferMinimumDelayMs) : null
     const jitterBufferQuality = getLatencyQuality(jitterBufferDelayMs)
     
     const webrtcFps = statsData.transport.webrtcFps ? parseFloat(statsData.transport.webrtcFps) : null
@@ -313,6 +315,14 @@ export function streamStatsToHtml(statsData: StreamStatsData): string {
         ${jitterBufferDelayMs != null ? `<div class="stats-row">
             <span class="stats-label">Buffer</span>
             <span class="stats-value ${qualityClass(jitterBufferQuality)}">${formatMs(jitterBufferDelayMs)}</span>
+        </div>` : ""}
+        ${jitterBufferTargetDelayMs != null ? `<div class="stats-row">
+            <span class="stats-label">Buffer Target</span>
+            <span class="stats-value">${formatMs(jitterBufferTargetDelayMs)}</span>
+        </div>` : ""}
+        ${jitterBufferMinimumDelayMs != null ? `<div class="stats-row">
+            <span class="stats-label">Buffer Min</span>
+            <span class="stats-value">${formatMs(jitterBufferMinimumDelayMs)}</span>
         </div>` : ""}
         ${decodeLatencyMs != null ? `<div class="stats-row">
             <span class="stats-label">Decode</span>

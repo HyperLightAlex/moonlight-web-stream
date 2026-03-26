@@ -206,13 +206,32 @@ pub struct StreamLaunchGameInfo {
 #[derive(Debug, Serialize)]
 pub struct StreamStartedRequest {
     #[serde(rename = "gameId")]
-    pub game_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<String>,
+}
+
+/// Stream paused notification request
+#[derive(Debug, Serialize)]
+pub struct StreamPausedRequest {
+    #[serde(rename = "gameId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<String>,
+}
+
+/// Stream failed notification request
+#[derive(Debug, Serialize)]
+pub struct StreamFailedRequest {
+    #[serde(rename = "gameId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<String>,
+    pub error: String,
 }
 
 /// Session response
 #[derive(Debug, Deserialize)]
 pub struct SessionResponse {
     pub active: bool,
+    pub state: Option<String>,
     #[serde(rename = "sessionId")]
     pub session_id: Option<String>,
     pub game: Option<SessionGameInfo>,
@@ -225,6 +244,8 @@ pub struct SessionResponse {
 pub struct SessionGameInfo {
     pub id: String,
     pub title: String,
+    #[serde(rename = "sunshineAppId")]
+    pub sunshine_app_id: Option<u32>,
 }
 
 /// Fuji status response
@@ -504,7 +525,7 @@ impl FujiInternalClient {
         Ok(stop_response)
     }
 
-    /// Get current streaming session
+    /// Get current legacy lifecycle session
     pub async fn get_session(&self) -> Result<SessionResponse, FujiInternalError> {
         let url = format!("{}/session", self.base_url);
 
@@ -514,6 +535,23 @@ impl FujiInternalClient {
             return Err(FujiInternalError::ApiError(
                 format!("Get session failed: {}", response.status())
             ));
+        }
+
+        let session: SessionResponse = response.json().await?;
+        Ok(session)
+    }
+
+    /// Get current stream orchestration session
+    pub async fn get_stream_session(&self) -> Result<SessionResponse, FujiInternalError> {
+        let url = format!("{}/stream/session", self.base_url);
+
+        let response = self.client.get(&url).send().await?;
+
+        if !response.status().is_success() {
+            return Err(FujiInternalError::ApiError(format!(
+                "Get stream session failed: {}",
+                response.status()
+            )));
         }
 
         let session: SessionResponse = response.json().await?;
@@ -646,14 +684,14 @@ impl FujiInternalClient {
     }
 
     /// Notify Fuji that the stream has started successfully
-    pub async fn stream_started(&self, game_id: &str) -> Result<(), FujiInternalError> {
+    pub async fn stream_started(&self, game_id: Option<&str>) -> Result<(), FujiInternalError> {
         let url = format!("{}/stream/started", self.base_url);
         
         let request = StreamStartedRequest { 
-            game_id: game_id.to_string() 
+            game_id: game_id.map(str::to_string),
         };
 
-        info!("[Fuji] Notifying stream started for game: {}", game_id);
+        info!("[Fuji] Notifying stream started for game: {:?}", game_id);
 
         let response = self.client
             .post(&url)
@@ -665,6 +703,57 @@ impl FujiInternalClient {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             warn!("[Fuji] Stream started notification failed: {} - {}", status, body);
+        }
+
+        Ok(())
+    }
+
+    /// Notify Fuji that the active stream was paused while the game keeps running
+    pub async fn stream_paused(&self, game_id: Option<&str>) -> Result<(), FujiInternalError> {
+        let url = format!("{}/stream/pause", self.base_url);
+
+        let request = StreamPausedRequest {
+            game_id: game_id.map(str::to_string),
+        };
+
+        info!("[Fuji] Notifying stream paused for game: {:?}", game_id);
+
+        let response = self.client.post(&url).json(&request).send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            warn!("[Fuji] Stream pause notification failed: {} - {}", status, body);
+        }
+
+        Ok(())
+    }
+
+    /// Notify Fuji that the stream failed to start
+    pub async fn stream_failed(
+        &self,
+        game_id: Option<&str>,
+        error: &str,
+    ) -> Result<(), FujiInternalError> {
+        let url = format!("{}/stream/failed", self.base_url);
+
+        let request = StreamFailedRequest {
+            game_id: game_id.map(str::to_string),
+            error: error.to_string(),
+        };
+
+        info!(
+            "[Fuji] Notifying stream failed for game {:?}: {}",
+            game_id,
+            error
+        );
+
+        let response = self.client.post(&url).json(&request).send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            warn!("[Fuji] Stream failed notification failed: {} - {}", status, body);
         }
 
         Ok(())

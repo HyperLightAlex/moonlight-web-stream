@@ -164,6 +164,7 @@ pub async fn new(
         .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
             StreamServerMessage::Setup {
                 ice_servers: vec![], // Not used for WebTransport, but kept for compatibility
+                primary_negotiation_role: common::api_bindings::PrimaryNegotiationRole::ClientOffer,
                 session_token: session_token.clone(),
                 webtransport_url: Some(webtransport_url),
                 webtransport_input_url: Some(webtransport_input_url),

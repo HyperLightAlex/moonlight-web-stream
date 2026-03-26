@@ -13,10 +13,10 @@ export class WebRTCTransport {
     constructor(logger) {
         this.implementationName = "webrtc";
         this.peer = null;
+        this.previousVideoStatsSample = null;
         this.onsendmessage = null;
         this.remoteDescription = null;
         this.iceCandidates = [];
-        this.forceDelayInterval = null;
         this.channels = [];
         this.videoTrackHolder = { ontrack: null, track: null };
         this.videoReceiver = null;
@@ -216,11 +216,13 @@ export class WebRTCTransport {
         let type = null;
         if (this.peer.connectionState == "connected") {
             type = "recover";
-            this.setDelayHintInterval(true);
+            // Reapply hints on connect/reconnect as a safety net. Some browsers
+            // deliver tracks before we reach "connected", while reconnect paths
+            // may keep existing receivers alive without firing a new track event.
+            this.applyDelayHintsToReceivers();
         }
         else if ((this.peer.connectionState == "failed" || this.peer.connectionState == "disconnected") && this.peer.iceGatheringState == "complete") {
             type = "fatal";
-            this.setDelayHintInterval(false);
         }
         // Always log connection state changes to console for debugging
         console.info(`[WebRTC]: Connection state: ${this.peer.connectionState}, ICE gathering: ${this.peer.iceGatheringState}`);
@@ -246,20 +248,24 @@ export class WebRTCTransport {
         }
         (_b = this.logger) === null || _b === void 0 ? void 0 : _b.debug(`Changing Peer Ice Gathering State to ${this.peer.iceGatheringState}`);
     }
-    setDelayHintInterval(setRunning) {
-        if (this.forceDelayInterval == null && setRunning) {
-            this.forceDelayInterval = setInterval(() => {
-                if (!this.peer) {
-                    return;
-                }
-                for (const receiver of this.peer.getReceivers()) {
-                    // @ts-ignore
-                    receiver.jitterBufferTarget = receiver.jitterBufferDelayHint = receiver.playoutDelayHint = 0;
-                }
-            }, 15);
+    applyDelayHints(receiver, trackKind) {
+        if ("playoutDelayHint" in receiver) {
+            receiver.playoutDelayHint = 0;
         }
-        else if (this.forceDelayInterval != null && !setRunning) {
-            clearInterval(this.forceDelayInterval);
+        if (trackKind !== "video") {
+            return;
+        }
+        if ("jitterBufferTarget" in receiver) {
+            receiver.jitterBufferTarget = WebRTCTransport.VIDEO_JITTER_BUFFER_TARGET_SECONDS;
+        }
+    }
+    applyDelayHintsToReceivers() {
+        var _a;
+        if (!this.peer) {
+            return;
+        }
+        for (const receiver of this.peer.getReceivers()) {
+            this.applyDelayHints(receiver, ((_a = receiver.track) === null || _a === void 0 ? void 0 : _a.kind) || "");
         }
     }
     initChannels() {
@@ -300,6 +306,7 @@ export class WebRTCTransport {
         var _a;
         const track = event.track;
         console.info(`[WebRTC]: Received track: kind=${track.kind}, id=${track.id}, label=${track.label}`);
+        this.applyDelayHints(event.receiver, track.kind);
         if (track.kind == "video") {
             this.videoReceiver = event.receiver;
         }
@@ -346,6 +353,7 @@ export class WebRTCTransport {
     close() {
         return __awaiter(this, void 0, void 0, function* () {
             var _a;
+            this.previousVideoStatsSample = null;
             (_a = this.peer) === null || _a === void 0 ? void 0 : _a.close();
         });
     }
@@ -356,9 +364,35 @@ export class WebRTCTransport {
                 return {};
             }
             const stats = yield this.videoReceiver.getStats();
-            console.debug("----------------- raw video stats -----------------");
-            for (const [key, value] of stats.entries()) {
-                console.debug("raw video stats", key, value);
+            if (this.peer) {
+                try {
+                    const peerStats = yield this.peer.getStats();
+                    for (const [, value] of peerStats.entries()) {
+                        if (value.type === "candidate-pair" && value.state === "succeeded") {
+                            if (value.currentRoundTripTime != null) {
+                                statsData.webrtcRttMs = (value.currentRoundTripTime * 1000).toString();
+                            }
+                        }
+                    }
+                }
+                catch (e) {
+                    console.debug("[WebRTC]: Failed to get peer stats for RTT", e);
+                }
+            }
+            let jitterBufferDelay = 0;
+            let jitterBufferTargetDelay = 0;
+            let jitterBufferMinimumDelay = 0;
+            let jitterBufferEmittedCount = 0;
+            let totalDecodeTime = 0;
+            let framesDecoded = 0;
+            let totalProcessingDelay = 0;
+            for (const [, value] of stats.entries()) {
+                const mediaKind = ((("kind" in value) && value.kind != null) ? value.kind : null)
+                    || ((("mediaType" in value) && value.mediaType != null) ? value.mediaType : null);
+                const isVideoInboundRtp = value.type === "inbound-rtp" && (mediaKind == null || mediaKind === "video");
+                if (!isVideoInboundRtp) {
+                    continue;
+                }
                 if ("decoderImplementation" in value && value.decoderImplementation != null) {
                     statsData.decoderImplementation = value.decoderImplementation;
                 }
@@ -372,25 +406,28 @@ export class WebRTCTransport {
                     statsData.webrtcFps = value.framesPerSecond;
                 }
                 if ("jitterBufferDelay" in value && value.jitterBufferDelay != null) {
-                    statsData.webrtcJitterBufferDelayMs = value.jitterBufferDelay;
+                    jitterBufferDelay = value.jitterBufferDelay;
+                }
+                if ("jitterBufferEmittedCount" in value && value.jitterBufferEmittedCount != null) {
+                    jitterBufferEmittedCount = value.jitterBufferEmittedCount;
                 }
                 if ("jitterBufferTargetDelay" in value && value.jitterBufferTargetDelay != null) {
-                    statsData.webrtcJitterBufferTargetDelayMs = value.jitterBufferTargetDelay;
+                    jitterBufferTargetDelay = value.jitterBufferTargetDelay;
                 }
                 if ("jitterBufferMinimumDelay" in value && value.jitterBufferMinimumDelay != null) {
-                    statsData.webrtcJitterBufferMinimumDelayMs = value.jitterBufferMinimumDelay;
+                    jitterBufferMinimumDelay = value.jitterBufferMinimumDelay;
                 }
                 if ("jitter" in value && value.jitter != null) {
-                    statsData.webrtcJitterMs = value.jitter;
+                    statsData.webrtcJitterSec = value.jitter.toString();
                 }
                 if ("totalDecodeTime" in value && value.totalDecodeTime != null) {
-                    statsData.webrtcTotalDecodeTimeMs = value.totalDecodeTime;
-                }
-                if ("totalAssemblyTime" in value && value.totalAssemblyTime != null) {
-                    statsData.webrtcTotalAssemblyTimeMs = value.totalAssemblyTime;
+                    totalDecodeTime = value.totalDecodeTime;
                 }
                 if ("totalProcessingDelay" in value && value.totalProcessingDelay != null) {
-                    statsData.webrtcTotalProcessingDelayMs = value.totalProcessingDelay;
+                    totalProcessingDelay = value.totalProcessingDelay;
+                }
+                if ("framesDecoded" in value && value.framesDecoded != null) {
+                    framesDecoded = value.framesDecoded;
                 }
                 if ("packetsReceived" in value && value.packetsReceived != null) {
                     statsData.webrtcPacketsReceived = value.packetsReceived;
@@ -401,14 +438,46 @@ export class WebRTCTransport {
                 if ("framesDropped" in value && value.framesDropped != null) {
                     statsData.webrtcFramesDropped = value.framesDropped;
                 }
-                if ("keyFramesDecoded" in value && value.keyFramesDecoded != null) {
-                    statsData.webrtcKeyFramesDecoded = value.keyFramesDecoded;
+            }
+            const previousSample = this.previousVideoStatsSample;
+            this.previousVideoStatsSample = {
+                jitterBufferDelay,
+                jitterBufferTargetDelay,
+                jitterBufferMinimumDelay,
+                jitterBufferEmittedCount,
+                totalDecodeTime,
+                totalProcessingDelay,
+                framesDecoded,
+            };
+            if (previousSample) {
+                const emittedDelta = jitterBufferEmittedCount - previousSample.jitterBufferEmittedCount;
+                const jitterDelayDelta = jitterBufferDelay - previousSample.jitterBufferDelay;
+                if (emittedDelta > 0 && jitterDelayDelta >= 0) {
+                    statsData.webrtcAvgJitterBufferDelayMs = ((jitterDelayDelta / emittedDelta) * 1000).toString();
+                }
+                const jitterTargetDelayDelta = jitterBufferTargetDelay - previousSample.jitterBufferTargetDelay;
+                if (emittedDelta > 0 && jitterTargetDelayDelta >= 0) {
+                    statsData.webrtcJitterBufferTargetDelayMs = ((jitterTargetDelayDelta / emittedDelta) * 1000).toString();
+                }
+                const jitterMinimumDelayDelta = jitterBufferMinimumDelay - previousSample.jitterBufferMinimumDelay;
+                if (emittedDelta > 0 && jitterMinimumDelayDelta >= 0) {
+                    statsData.webrtcJitterBufferMinimumDelayMs = ((jitterMinimumDelayDelta / emittedDelta) * 1000).toString();
+                }
+                const decodedDelta = framesDecoded - previousSample.framesDecoded;
+                const decodeTimeDelta = totalDecodeTime - previousSample.totalDecodeTime;
+                if (decodedDelta > 0 && decodeTimeDelta >= 0) {
+                    statsData.webrtcAvgDecodeTimeMs = ((decodeTimeDelta / decodedDelta) * 1000).toString();
+                }
+                const processingDelayDelta = totalProcessingDelay - previousSample.totalProcessingDelay;
+                if (decodedDelta > 0 && processingDelayDelta >= 0) {
+                    statsData.webrtcAvgProcessingDelayMs = ((processingDelayDelta / decodedDelta) * 1000).toString();
                 }
             }
             return statsData;
         });
     }
 }
+WebRTCTransport.VIDEO_JITTER_BUFFER_TARGET_SECONDS = 0.01;
 // This receives track data
 class WebRTCInboundTrackTransportChannel {
     constructor(logger, type, label, trackHolder) {

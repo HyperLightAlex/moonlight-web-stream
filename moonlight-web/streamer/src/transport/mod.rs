@@ -467,6 +467,7 @@ impl OutboundPacket {
 
 pub enum TransportEvent {
     StartStream { settings: StreamSettings },
+    PrimaryPeerReady,
     RecvPacket(InboundPacket),
     SendIpc(StreamerIpcMessage),
     // TODO: use the error and not this event here
@@ -478,6 +479,10 @@ pub trait TransportEvents {
 }
 #[async_trait]
 pub trait TransportSender {
+    fn start_stream_before_connected(&self) -> bool {
+        false
+    }
+
     async fn setup_video(&self, setup: VideoSetup) -> i32;
     async fn send_video_unit<'a>(
         &'a self,
@@ -492,6 +497,10 @@ pub trait TransportSender {
     async fn send_audio_sample(&self, data: &[u8]) -> Result<(), TransportError>;
 
     async fn send(&self, packet: OutboundPacket) -> Result<(), TransportError>;
+
+    async fn start_primary_negotiation(&self) -> Result<(), TransportError> {
+        Ok(())
+    }
 
     async fn on_ipc_message(&self, message: ServerIpcMessage) -> Result<(), TransportError>;
 
